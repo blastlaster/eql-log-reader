@@ -1,0 +1,1186 @@
+#!/usr/bin/env python3
+"""
+EQL Combat Tracker
+===================
+Parses combat-related lines out of an EverQuest Legends log for a single
+character. Real logs show that EQL DOES log third-party combat in full
+(groupmates, their pets, even mobs fighting each other) -- those lines are
+matched-and-ignored on purpose, with ONE exception: your own pet, which is
+tracked as its OWN actor ("Pet") with its own DPS/DTPS, swing stats, and
+melee/skill/spell breakdown, separate from yours. Pets are recognized two
+ways: "<Charname>`s warder"-style possessive names by pattern, and proper-
+named pets (necro/mage style) from the "/pet leader" say line ("Jenann
+says, 'My leader is Monomate.'"). Everything else stays scoped to "you",
+both to keep the meter personal and so nearby fights can't stretch your
+fight window. Produces both:
+
+  * live per-fight stats (for the retro DPS/HPS meter overlay)
+  * session-wide totals (for the session report): damage split six ways
+    (Melee / Skill / Spell / Song / Damage Shield / Pet), heal totals,
+    kill rate, and a
+    per-ability breakdown showing which spell, skill, or plain melee is
+    contributing the most damage/healing.
+
+Data model: a SESSION starts at the "Welcome to EverQuest Legends!" login
+banner and is the top-level boundary -- all totals, kills, fights, and
+rolling windows reset there, so a log file holding many days of play never
+skews the numbers. Within a session, a COMBAT starts the moment damage is
+dealt or received and ends when no damage has been dealt/received for
+IDLE_TIMEOUT seconds (default 45; the DPS meter exposes a 5-60s selector)
+(heals, misses, and casts neither start nor extend it; heals still count
+toward HPS and session totals). Rates divide by ACTIVE combat time: the
+gap between consecutive damage events counts in full only up to
+ACTIVE_GAP_CAP (10s); anything longer -- looting, medding, walking to the
+next mob inside the 45s idle window -- is capped. Without this, chained
+pulls diluted DPS badly (real logs showed 264s "fights" whose actual
+swinging time was a quarter of that, reading 1 DPS while landing 50-point
+hits). Swing gaps in real logs cluster at 1-7s, so the 10s cap never
+clips normal weapon delay.
+
+Melee vs. Skill split (best-effort)
+--------------------------------------
+Physical damage lines all share one format ("You <verb> X for N points of
+damage."), so the only signal for "was this a basic weapon swing or an
+activated skill" is the verb itself. MELEE_VERBS covers ordinary weapon-type
+swings (slash/crush/pierce/hit/bite/claw/etc.); SKILL_VERBS covers the
+handful of classic-EQ activated combat skills that share this same log
+format (kick, bash, backstab, frenzy, slam). This is the standard
+classic-EverQuest convention, not independently re-confirmed against EQL's
+specific skill list -- same caveat tier as the Stance/Invocation descriptor
+guesses below. If EQL has activated skills that use a verb not in either
+set, they'll currently fall through unmatched and land in
+`CombatTracker.unmatched` for calibration, same as any other unrecognized
+line.
+
+Calibration note (checked against a real eqlog_*.txt)
+-------------------------------------------------------
+    You slash a spiderling for 39 points of damage. (Critical)
+        -- crits are an inline "(Critical)" suffix, not a separate
+           "You deliver a critical blow!" announcement line.
+    A spiderling bites YOU for 1 point of damage.
+    You try to slash a spiderling, but a spiderling dodges!
+    A spiderling tries to bite YOU, but misses!
+        -- misses/avoidance are phrased "tries to <verb> <target>, but ...!"
+    A spiderling has taken 3 damage from your Chords of Dissonance.
+        -- spell/DoT damage names the caster and spell directly.
+    You healed Miranda for 2 (20) hit points by Minor Healing.
+        -- heals use "hit points", include overheal in parens, name the
+           spell, and refer to the caster's own character by name when
+           self-targeted rather than "yourself".
+    a darkweed snake hit you for 11 points of poison damage by Poison.
+        -- direct spell/elemental damage on you: lowercase "you", an
+           element word before "damage", and "by <spell>" at the end.
+    You have taken 10 damage from Poison by a darkweed snake.
+        -- DoT ticks on you use this separate phrasing.
+    An orc warrior has taken 6 damage by Weak Poison.
+        -- your own applied weapon poison/proc ticks; no caster is named
+           ("by" not "from your"), attributed to You.
+    An orc warrior hits YOU for 4 points of damage. (Riposte)
+        -- "(Riposte)" and other parenthesized tags can follow any combat
+           line, same style as "(Critical)"; all tags are stripped before
+           matching, only Critical affects stats.
+    YOU are pierced by a gnoll's thorns for 5 points of non-melee damage!
+        -- a MOB's damage shield burning you when your hit lands. Note the
+           "YOU are" phrasing and the trailing "!" (third-party DS reads
+           "An asp is pierced by Becca's thorns ... damage." with a ".").
+
+Stance/Invocation switch lines (confirmed against a real log, screenshots
+provided by the user):
+
+    You begin to change your stance.
+    You assume an offensive stance.
+
+    You begin to change your invocation.
+    You begin reciting the recovery invocation.
+
+The "begin to change your ___" line is just an announcement (no useful
+info) and is matched-and-ignored. The second line names the new stance/
+invocation, but as an adjective/descriptor ("offensive", "recovery")
+rather than the canonical name used elsewhere ("Offense Stance",
+"Recover") -- STANCE_DESCRIPTORS/INVOCATION_DESCRIPTORS below map the
+wording that's actually been observed to the canonical name. Only
+"offensive" (-> Offense Stance) and "recovery" (-> Recover) have been seen
+in a real log; "defensive"/"mage hunter" and "over channel"/"spell blade"
+are still guesses at the descriptor word game will use for the other two
+stances/invocations -- the *line format* is confirmed, just not every
+descriptor. An unrecognized descriptor still gets tracked (under its own
+raw name) rather than silently dropped, so it'll show up distinctly in the
+session report if the guess is wrong, rather than disappearing.
+
+The known stance/invocation *effects* (hardcoded in STANCES/INVOCATIONS)
+come from eqlwiki.com, since that's a small, fixed, documented set
+regardless of log wording.
+
+Why spell damage/mana numbers aren't pulled from spells_us.txt
+-----------------------------------------------------------------
+spells_us.txt (confirmed present, classic pipe-delimited EQ spell database,
+173 fields/row) does exist in this install and is genuinely readable --
+eql_spell_db.py parses it for name/mana/cast-time/recast-time lookups where
+the field layout could be validated with confidence. But this 173-field
+revision doesn't line up cleanly with the field-by-field schema EQEmu
+documents for modern spells_new (that schema has 200+ fields, several of
+them added over years of live patches this file predates), and getting an
+effect *magnitude* field wrong would silently produce confidently-wrong
+numbers -- worse than not having them. Actual damage/heal amounts here
+come from the log instead, which is ground truth (it already reflects
+resists, crits, and level scaling that a static formula field wouldn't).
+"""
+
+import re
+import time
+from collections import deque
+from datetime import datetime
+
+TS_RE = r"\[(?P<ts>[A-Za-z]{3} [A-Za-z]{3} \d{2} \d{2}:\d{2}:\d{2} \d{4})\] "
+TS_ONLY_RE = re.compile(TS_RE)
+LOG_TS_FMT = "%a %b %d %H:%M:%S %Y"
+
+# session boundary -- confirmed login banner
+SESSION_START_RE = re.compile(TS_RE + r"Welcome to EverQuest Legends!\s*$")
+
+# Data model (per the user's spec):
+#   SESSION -- starts at "Welcome to EverQuest Legends!" (login). ALL
+#     session-scoped state resets there, so numbers never mix play sessions
+#     that happen to share a log file.
+#   COMBAT  -- within a session: starts the moment damage is dealt or
+#     received, ends when no damage has been dealt/received for
+#     IDLE_TIMEOUT seconds. Heals, misses, and casts neither start nor
+#     extend a Combat (heals still count toward HPS/session totals).
+#     Rates divide by ACTIVE combat time (see Fight.touch/ACTIVE_GAP_CAP).
+IDLE_TIMEOUT = 45.0
+ACTIVE_GAP_CAP = 10.0       # a gap between damage events counts toward active
+                            # combat time only up to this many seconds --
+                            # downtime between chained pulls (loot/med/run,
+                            # < IDLE_TIMEOUT) must not dilute DPS. Real swing
+                            # gaps cluster at 1-7s, so this never clips
+                            # ordinary weapon delay or short miss streaks.
+ROLLING_MAX_WINDOW = 30.0   # largest rolling-rate window the meter offers
+MAX_FIGHT_HISTORY = 20
+MAX_UNMATCHED = 200
+CRIT_WINDOW = 2.0           # seconds a "critical hit" announcement stays live
+                            # (log timestamps only have 1s resolution, so this
+                            # needs slack wider than wall-clock would)
+CAST_WINDOW = 4.0           # seconds a "begins casting" stays attributable
+
+MELEE_VERBS = {
+    "hit", "hits", "slash", "slashes", "pierce", "pierces", "crush", "crushes",
+    "claw", "claws", "bite", "bites", "sting", "stings", "punch", "punches",
+    "gore", "gores", "maul", "mauls", "rend", "rends", "smash", "smashes",
+    "strike", "strikes", "slice", "slices", "gouge", "gouges", "burn", "burns",
+    "cleave", "cleaves",   # confirmed in a real log (sand giant)
+    "shoot", "shoots",     # confirmed in a real log (archery, 780 hits)
+    "smite", "smites",     # confirmed in a real log (179 hits)
+    "reave", "reaves",     # confirmed in a real log (21 hits)
+}
+SKILL_VERBS = {
+    "kick", "kicks", "bash", "bashes", "backstab", "backstabs",
+    "frenzy", "frenzies", "slam", "slams",
+}
+ATTACK_VERBS = MELEE_VERBS | SKILL_VERBS
+
+SKILL_VERB_NAMES = {
+    "kick": "Kick", "kicks": "Kick",
+    "bash": "Bash", "bashes": "Bash",
+    "backstab": "Backstab", "backstabs": "Backstab",
+    "frenzy": "Frenzy", "frenzies": "Frenzy",
+    "slam": "Slam", "slams": "Slam",
+}
+
+MELEE_ABILITY = "Melee"
+CATEGORY_LABELS = {"melee": "Melee", "skill": "Skill", "spell": "Spell",
+                   "song": "Song", "ds": "Dmg Shield", "pet": "Pet"}
+CATEGORIES = ("melee", "skill", "spell", "song", "ds", "pet")
+
+
+def _attack_category_and_ability(verb):
+    """Classify a physical-attack verb into ("melee"|"skill", ability_name)."""
+    if verb in SKILL_VERBS:
+        return "skill", SKILL_VERB_NAMES.get(verb, verb.strip("s").capitalize())
+    return "melee", MELEE_ABILITY
+
+# ----------------------------------------------------------------------------
+# Known Stance/Invocation effects (from eqlwiki.com -- a small fixed set,
+# not per-character data, so hardcoding is reliable where log detection is
+# not). Swapping either has a short cooldown; exactly one of each is active
+# at a time.
+# ----------------------------------------------------------------------------
+STANCES = {
+    "Defense Stance": "-50% physical damage taken, -20% magic damage taken",
+    "Offense Stance": "2x melee damage, +25% crit chance",
+    "Mage Hunter Stance": "-50% magic damage taken, -20% physical damage taken",
+}
+INVOCATIONS = {
+    "Recover": "2x mana regen, -5% spell cost",
+    "Over Channel": "severely reduces target's spell resistance; bonuses per caster class",
+    "Spell Blade": "chance to trigger a chosen spell on melee attack",
+}
+
+# -- trailing tag suffixes: "...damage. (Critical)" / "...misses! (Riposte)"
+# The client appends parenthesized tags after the sentence-final ./! --
+# "(Critical)" and "(Riposte)" are both confirmed in real logs. Tags are
+# stripped in a loop (in case of stacking) before any other matching; only
+# "(Critical)" changes stats, the rest just must not break the line match.
+TAG_SUFFIX_RE = re.compile(r"^(?P<body>.*[.!])\s*\((?P<tag>[A-Za-z][A-Za-z ]*)\)\s*$")
+
+# -- self as source ----------------------------------------------------------
+# Plain melee: "You slash a spiderling for 39 points of damage."
+# Elemental/proc: "You hit an orc for 4 points of fire damage by Burst of Flame."
+SELF_HIT_RE = re.compile(
+    TS_RE + r"You (?P<verb>[a-z]+) (?P<target>.+?) for (?P<amount>\d+) points? of "
+            r"(?:(?P<element>[a-z]+) )?damage(?: by (?P<spell>.+?))?\.?\s*$")
+
+# -- self as target ------------------------------------------------------------
+# Melee uses uppercase YOU ("An orc warrior cleaves YOU for 19 points of
+# damage."); spell/elemental hits use lowercase you and name the spell
+# ("a darkweed snake hit you for 11 points of poison damage by Poison.").
+SELF_TAKEN_RE = re.compile(
+    TS_RE + r"(?P<source>.+?) (?P<verb>[a-z]+) (?:YOU|you) for (?P<amount>\d+) points? of "
+            r"(?:(?P<element>[a-z]+) )?damage(?: by (?P<spell>.+?))?\.?\s*$")
+
+# Words that can land in the verb slot of the two patterns above but are
+# never attacks (e.g. the classic heal fallback "You have healed X for N
+# points of damage" must keep falling through to the heal regexes).
+NON_ATTACK_VERBS = {"have", "has", "had", "healed", "heals", "heal"}
+
+# -- DoT ticks on you -- confirmed: "You have taken 10 damage from Poison by
+# a darkweed snake."  ("by <source>" may be absent for untraceable sources)
+INCOMING_DOT_RE = re.compile(
+    TS_RE + r"You have taken (?P<amount>\d+) damage from (?P<spell>.+?)"
+            r"(?: by (?P<source>.+?))?\.?\s*$")
+
+# -- your own weapon-poison/proc ticks -- confirmed: "An orc warrior has
+# taken 6 damage by Weak Poison."  No caster is named; the client only
+# echoes procs you applied, so this is attributed to You. (If EQL turns out
+# to echo other players' procs too, this will over-credit -- calibrate via
+# the session report's per-ability list, where it shows under the poison's
+# own name.)
+PROC_DOT_RE = re.compile(
+    TS_RE + r"(?P<target>.+?) has taken (?P<amount>\d+) damage by (?P<spell>.+?)\.?\s*$")
+
+# -- misses / avoidance -- confirmed real format: "tries to VERB X, but ...!"
+SELF_MISS_RE = re.compile(
+    TS_RE + r"You try to [a-z]+ (?P<target>.+?), but .+!\s*$")
+OTHER_MISS_ON_SELF_RE = re.compile(
+    TS_RE + r"(?P<source>.+?) tries to [a-z]+ YOU, but .+!\s*$")
+# classic-EQ fallback phrasing, kept in case it shows up too
+SELF_MISS_FALLBACK_RE = re.compile(TS_RE + r"You miss (?P<target>.+?)\.?\s*$")
+SELF_DODGED_FALLBACK_RE = re.compile(TS_RE + r"(?P<source>.+?) misses? YOU\.?\s*$")
+
+# -- non-melee (spell/DoT) damage -- confirmed real format names the caster --
+NONMELEE_ATTR_RE = re.compile(
+    TS_RE + r"(?P<target>.+?) has taken (?P<amount>\d+) damage from "
+            r"(?:your|(?P<caster>[A-Za-z]+)'s) (?P<spell>.+?)\.?\s*$")
+# classic-EQ fallback (unattributed) -- kept in case it shows up too
+NONMELEE_FALLBACK_RE = re.compile(
+    TS_RE + r"(?P<target>You|[A-Za-z][A-Za-z' -]*?) (?:was|were) hit by non-melee for (?P<amount>\d+) damage\.?\s*$")
+
+# -- casting, used to attribute the fallback non-melee message, to log
+#    non-damage spell casts (buffs/utility), and to learn whether an ability
+#    is a spell or a Bard song ("casting" vs "singing") so its damage lands
+#    in the right category later (DoT ticks name only the ability) ----------
+CASTING_RE = re.compile(
+    TS_RE + r"(?P<who>You|[A-Za-z]+) begin(?:s)? (?P<how>casting|singing) (?P<spell>[A-Za-z' ]+?)\.?\s*$")
+
+# -- third-party combat (confirmed logged in EQL: group members, their pets,
+#    and mobs fighting each other all appear in full). Only lines involving
+#    YOUR OWN pet ("<Charname>`s warder" etc.) are recorded; the rest are
+#    matched-and-ignored so they can't pollute fight timing or `unmatched`.
+OTHER_HIT_RE = re.compile(
+    TS_RE + r"(?P<source>.+?) (?P<verb>[a-z]+) (?P<target>.+?) for (?P<amount>\d+) points? of "
+            r"(?:(?P<element>[a-z]+) )?damage(?: by (?P<spell>.+?))?\.?\s*$")
+OTHER_DOT_RE = re.compile(
+    TS_RE + r"(?P<target>.+?) has taken (?P<amount>\d+) damage from (?P<spell>.+?)"
+            r" by (?P<source>.+?)\.?\s*$")
+OTHER_SLAIN_RE = re.compile(
+    TS_RE + r"(?P<target>.+?) has been slain by (?P<source>.+?)!?\s*$")
+# third-party heals ("Miranda healed herself for 12 hit points by Minor
+# Healing.", "Cryze healed Krudd over time for 8 hit points by Flowering
+# Heal.") -- matched-and-ignored so they stay out of `unmatched`
+OTHER_HEAL_RE = re.compile(
+    TS_RE + r"(?P<source>.+?) healed (?P<target>.+?)(?: over time)? for (?P<amount>\d+)"
+            r"(?:\s*\((?P<overheal>\d+)\))? hit points?(?: by (?P<spell>.+?))?\.?\s*$")
+
+# -- Mend (monk) -- confirmed format prints NO amount ("You mend your wounds
+#    and heal some damage."), so it's tracked as an ability use with 0 healing
+#    rather than silently dropped; there is nothing numeric to add to HPS.
+MEND_RE = re.compile(TS_RE + r"You mend your wounds and heal some damage\.?\s*$")
+
+# -- passive regen announcement -- confirmed: "Your wounds begin to heal."
+#    Carries no amount; matched-and-ignored so it stays out of `unmatched`.
+REGEN_RE = re.compile(TS_RE + r"Your wounds begin to heal\.?\s*$")
+
+# -- pet ownership -- confirmed: "Jenann says, 'My leader is Monomate.'"
+#    (the /pet leader command). This is how named pets (necro/mage style,
+#    whose random names carry no owner information) get attributed; warder-
+#    style pets ("<Charname>`s warder") are recognized by pattern alone.
+PET_LEADER_RE = re.compile(
+    TS_RE + r"(?P<pet>[A-Za-z]+) says, 'My leader is (?P<owner>[A-Za-z]+)\.'\s*$")
+
+# -- chat lines -- players quoting combat words ("the damage shields
+#    really rip") were landing in the calibration list. Any tell/say/
+#    shout/auction line is chat, never combat -- matched-and-ignored.
+#    Checked AFTER PET_LEADER_RE, which is itself a "says" line.
+CHAT_RE = re.compile(
+    TS_RE + r"(?:You|[A-Za-z][A-Za-z` ]{0,40}?) "
+            r"(?:say|says|told|tells|shout|shouts|auction|auctions)\b"
+            r"[^,]{0,40}, '")
+
+# -- damage shields -- confirmed third-party format: "A rattlesnake is
+#    pierced by Miranda's thorns for 14 points of non-melee damage."  Your
+#    own reads "by YOUR thorns" (classic-EQ convention, capital YOUR).
+DS_SELF_RE = re.compile(
+    TS_RE + r"(?P<target>.+?) is [a-z]+ by YOUR (?P<kind>[A-Za-z ]+?) "
+            r"for (?P<amount>\d+) points? of non-melee damage\.?\s*$")
+DS_OTHER_RE = re.compile(
+    TS_RE + r"(?P<target>.+?) is [a-z]+ by (?P<owner>.+?)'s (?P<kind>[A-Za-z ]+?) "
+            r"for (?P<amount>\d+) points? of non-melee damage\.?\s*$")
+# a MOB's damage shield burning YOU -- confirmed: "YOU are pierced by a
+# gnoll's thorns for 5 points of non-melee damage!" ("YOU are" + trailing
+# "!", unlike the third-party form's "is ... damage.")
+DS_TAKEN_RE = re.compile(
+    TS_RE + r"YOU are [a-z]+ by (?P<owner>.+?)[`']s (?P<kind>[A-Za-z ]+?) "
+            r"for (?P<amount>\d+) points? of non-melee damage[.!]?\s*$")
+
+# -- critical hit announcements (classic-EQ fallback; this client uses the
+#    inline "(Critical)" suffix above instead) ------------------------------
+CRIT_RE = re.compile(
+    TS_RE + r"(?:You deliver a critical blow!|(?P<source>[A-Za-z]+) (?:scores a critical hit|delivers a critical blow)!?)\s*$")
+
+# -- healing -- confirmed real format names the spell + overheal total ------
+HEAL_DEALT_ATTR_RE = re.compile(
+    TS_RE + r"You healed (?P<target>.+?)(?: over time)? for (?P<amount>\d+)"
+            r"(?:\s*\((?P<overheal>\d+)\))? hit points?(?: by (?P<spell>.+?))?\.?\s*$")
+HEAL_RECEIVED_ATTR_RE = re.compile(
+    TS_RE + r"(?P<source>.+?) healed you(?: over time)? for (?P<amount>\d+)"
+            r"(?:\s*\((?P<overheal>\d+)\))? hit points?(?: by (?P<spell>.+?))?\.?\s*$")
+# classic-EQ fallback phrasing -- kept in case it shows up too
+HEAL_DEALT_FALLBACK_RE = re.compile(
+    TS_RE + r"You have healed (?P<target>.+?) for (?P<amount>\d+) points? of damage\.?\s*$")
+HEAL_RECEIVED_FALLBACK_RE = re.compile(
+    TS_RE + r"(?P<source>.+?) has healed you for (?P<amount>\d+) points? of damage\.?\s*$")
+
+# -- deaths ---------------------------------------------------------------------
+SELF_DEATH_RE = re.compile(TS_RE + r"You have been slain by (?P<source>.+?)!?\s*$")
+SELF_KILL_RE = re.compile(TS_RE + r"You have slain (?P<target>.+?)!?\s*$")
+
+# -- stance / invocation switches -- confirmed format, see module docstring -
+STANCE_CHANGING_RE = re.compile(TS_RE + r"You begin to change your stance\.?\s*$")
+INVOCATION_CHANGING_RE = re.compile(TS_RE + r"You begin to change your invocation\.?\s*$")
+
+STANCE_ASSUME_RE = re.compile(
+    TS_RE + r"You assume (?:a|an) (?P<descriptor>[A-Za-z][A-Za-z '-]*?) stance\.?\s*$")
+INVOCATION_RECITE_RE = re.compile(
+    TS_RE + r"You begin reciting the (?P<descriptor>[A-Za-z][A-Za-z '-]*?) invocation\.?\s*$")
+
+# descriptor word (as it appears in the log line) -> canonical name (as it
+# appears in STANCES/INVOCATIONS above). Only the mappings marked "confirmed"
+# have actually been seen in a real log; the others are guesses.
+STANCE_DESCRIPTORS = {
+    "offensive": "Offense Stance",       # confirmed
+    "defensive": "Defense Stance",       # guess
+    "mage hunter": "Mage Hunter Stance",  # guess
+}
+INVOCATION_DESCRIPTORS = {
+    "recovery": "Recover",             # confirmed
+    "over channel": "Over Channel",    # guess
+    "overchanneling": "Over Channel",  # guess (alternate wording)
+    "spell blade": "Spell Blade",      # guess
+}
+
+
+def _resolve_descriptor(descriptor, table):
+    """Map a log-line descriptor word to its canonical Stance/Invocation
+    name. Falls back to the descriptor itself (title-cased) if it's not one
+    of the recognized wordings, so an unexpected switch still gets tracked
+    under a distinct name instead of silently disappearing."""
+    return table.get(descriptor.strip().lower(), descriptor.strip().title())
+
+YOU_LABEL = "You"
+PET_LABEL = "Pet"   # your pet is its own actor, with its own DPS/DTPS
+
+
+def _norm(name, self_name=None):
+    """Collapse 'a bat' / 'A bat' (sentence-initial capital) / 'the bat' to
+    one stable display label, and map the player's own character name (and
+    literal "You"/"YOU") to YOU_LABEL."""
+    name = name.strip()
+    if name.upper() == "YOU":
+        return YOU_LABEL
+    if self_name and name.lower() == self_name.lower():
+        return YOU_LABEL
+    first, _, rest = name.partition(" ")
+    if first.lower() in ("a", "an", "the"):
+        return first.lower() + (" " + rest if rest else "")
+    return name
+
+
+def _blank_actor():
+    d = {
+        "dmg_out": 0, "dmg_in": 0, "heal_out": 0, "heal_in": 0,
+        "hits": 0, "misses": 0, "crits": 0, "biggest_hit": 0,
+        "last_hit_wall": 0.0, "last_crit_wall": 0.0,
+    }
+    # per-category live breakdown, for the DPS meter's segmented display
+    for c in CATEGORIES:
+        d[f"{c}_dmg_out"] = 0
+        d[f"{c}_dmg_in"] = 0
+    return d
+
+
+def _blank_ability():
+    return {"total": 0, "hits": 0, "crits": 0, "biggest": 0, "category": "melee"}
+
+
+class Fight:
+    def __init__(self, start_wall):
+        self.start_wall = start_wall
+        self.last_wall = start_wall
+        self.active_secs = 0.0
+        self.ended = False
+        self.actors = {}   # name -> stat dict
+        self.stance = None
+        self.invocation = None
+
+    def actor(self, name):
+        return self.actors.setdefault(name, _blank_actor())
+
+    def touch(self, wall_time):
+        # Accumulate ACTIVE combat time: the gap since the previous damage
+        # event counts in full only up to ACTIVE_GAP_CAP. Longer gaps
+        # (looting, medding, running to the next mob -- anything under the
+        # 45s idle timeout chains into the same Fight) are capped so
+        # downtime between pulls can't dilute DPS.
+        gap = wall_time - self.last_wall
+        if gap > 0:
+            self.active_secs += min(gap, ACTIVE_GAP_CAP)
+            self.last_wall = wall_time
+
+    def elapsed(self):
+        # ACTIVE combat time (see touch) -- the denominator for all rates.
+        # Floor of 1s: log stamps have 1s resolution, and a fight whose only
+        # hit just landed shouldn't divide by ~0.
+        return max(self.active_secs, 1.0)
+
+    def span(self):
+        """Wall-clock span (first damage to last damage), gaps included --
+        for the fight-timer display only; rates use elapsed()."""
+        return max(self.last_wall - self.start_wall, 1.0)
+
+    def total_dmg_out(self):
+        return sum(a["dmg_out"] for a in self.actors.values())
+
+    def total_heal_out(self):
+        return sum(a["heal_out"] for a in self.actors.values())
+
+
+class CombatTracker:
+    """Consumes log lines for a single character; maintains the current
+    fight (for live display) plus session-wide totals (for the report)."""
+
+    def __init__(self, on_change=None, idle_timeout=IDLE_TIMEOUT, self_name=None):
+        self.on_change = on_change
+        self.idle_timeout = idle_timeout
+        self.self_name = self_name
+
+        # persistent across sessions: calibration aids only ------------------
+        self.unmatched = deque(maxlen=MAX_UNMATCHED)
+        # attack verbs seen that aren't in MELEE_VERBS/SKILL_VERBS -- they're
+        # counted as melee, but noted here (and once in `unmatched`) so
+        # calibration can promote them to the right set later
+        self.unknown_verbs = {}      # verb -> count
+        # ability -> "song"|"spell", learned from "You begin singing/casting
+        # X" lines, so DoT ticks (which only name the ability) categorize
+        # correctly. Unknown abilities default to "spell".
+        self.ability_kind = {}
+
+        # everything the meter/report shows is SESSION-scoped and resets on
+        # the "Welcome to EverQuest Legends!" login banner
+        self._reset_session_state(None)
+
+        # Your pet(s): "<Charname>`s warder"-style names match by pattern
+        # alone; named pets (necro/mage style, e.g. "Jenann") are learned
+        # from the pet-leader say line ("Jenann says, 'My leader is
+        # Monomate.'" -- use /pet leader after summoning). Learned names
+        # persist across session resets: a resummoned pet announces again,
+        # and stale names are harmless.
+        self.pet_names = set()
+        self._pet_names_lower = set()
+        self._pet_hit_out_re = self._pet_hit_in_re = None
+        self._rebuild_pet_res()
+
+    def _reset_session_state(self, wall_time):
+        """Start a fresh play session -- called at init and every time the
+        "Welcome to EverQuest Legends!" login banner appears. Sessions are
+        the top-level data boundary: nothing the meter or report shows may
+        mix data across sessions."""
+        self.current = None
+        self.history = deque(maxlen=MAX_FIGHT_HISTORY)
+        self._pending_crit_until = 0.0
+        self._pending_crit_source = None
+        self._pending_casts = {}     # name -> (spell, expires_wall)
+        self._last_activity_wall = 0.0
+        self.session_start_wall = wall_time
+
+        # session totals ------------------------------------------------------
+        # physical_dmg_in (melee + skill taken) is a derived property below,
+        # used by the session report's Overview tab.
+        self.melee_dmg_out = 0
+        self.melee_dmg_in = 0
+        self.skill_dmg_out = 0
+        self.skill_dmg_in = 0
+        self.spell_dmg_out = 0
+        self.spell_dmg_in = 0
+        self.song_dmg_out = 0
+        self.song_dmg_in = 0
+        self.ds_dmg_out = 0      # your damage shield burning attackers
+        self.ds_dmg_in = 0       # mobs' damage shields burning you
+        self.pet_dmg_out = 0
+        self.pet_dmg_in = 0      # damage YOUR PET took (not part of your DTPS)
+        self.heal_out_total = 0
+        self.heal_in_total = 0
+        self.kills = []              # wall timestamps of "You have slain X!"
+        self.deaths = []             # wall timestamps of your own deaths
+        # session-wide swing stats for YOU (feed the meter's ALL TIME
+        # visualizer and anything else needing session accuracy): swings
+        # that landed / missed, crit count, biggest single hit. DS ticks
+        # (swing=False) are excluded, same as the per-fight actor stats.
+        self.swings_hit = 0
+        self.swings_missed = 0
+        self.crit_count = 0
+        self.biggest_hit = 0
+        # completed-fight accumulators (session comparison / avg combat DPS):
+        # YOUR damage and active seconds summed over every completed fight,
+        # so the whole session's combat performance survives even though
+        # `history` only keeps the last MAX_FIGHT_HISTORY fights.
+        self.fights_completed = 0
+        self.combat_active_secs = 0.0
+        self.combat_dmg_out = 0
+        self.combat_dmg_in = 0
+        self.abilities_dmg = {}      # ability name -> _blank_ability()
+        self.abilities_heal = {}     # ability name -> _blank_ability()
+        self.spell_casts = {}        # spell name -> cast count
+
+        self.stance = None           # unknown until re-asserted this session
+        self.invocation = None
+        self.stance_history = []     # (wall_time, name)
+        self.invocation_history = []  # (wall_time, name)
+
+        # rolling rate support: recent (wall_time, amount, category) events
+        # for You and your pet, trimmed to ROLLING_MAX_WINDOW
+        self._recent = {"dmg_out": deque(), "heal_out": deque(),
+                        "dmg_in": deque(),
+                        "pet_out": deque(), "pet_in": deque()}
+        self._notify()
+
+    @property
+    def physical_dmg_in(self):
+        return self.melee_dmg_in + self.skill_dmg_in
+
+    def _n(self, name):
+        return _norm(name, self.self_name)
+
+    def _is_pet(self, name):
+        """True if `name` is this character's own pet: either a
+        "<Charname>`s warder"-style possessive name, or a proper name
+        learned from the "My leader is <Charname>" say line."""
+        n = name.strip().lower()
+        if self.self_name and n.startswith(self.self_name.lower() + "`s "):
+            return True
+        return n in self._pet_names_lower
+
+    def _register_pet(self, name):
+        """A pet announced this character as its leader -- remember it and
+        recompile the pet combat-line regexes to include it."""
+        if name.lower() in self._pet_names_lower:
+            return
+        self.pet_names.add(name)
+        self._pet_names_lower.add(name.lower())
+        self._rebuild_pet_res()
+        self._notify()
+
+    def _rebuild_pet_res(self):
+        """(Re)compile pet combat-line regexes anchored on the literal pet
+        name(s). The generic third-party regex can't be reused here: its
+        lazy groups mis-split possessive or multi-word names (the verb slot
+        lands on "warder"), silently dropping pet damage."""
+        alts = []
+        if self.self_name:
+            alts.append(re.escape(self.self_name) + r"`s [A-Za-z]+")
+        alts.extend(re.escape(p) for p in sorted(self.pet_names))
+        if not alts:
+            self._pet_hit_out_re = self._pet_hit_in_re = None
+            return
+        pet = "(?:" + "|".join(alts) + ")"
+        tail = (r" for (?P<amount>\d+) points? of "
+                r"(?:(?P<element>[a-z]+) )?damage(?: by (?P<spell>.+?))?\.?\s*$")
+        self._pet_hit_out_re = re.compile(
+            TS_RE + r"(?P<source>" + pet + r") (?P<verb>[a-z]+) "
+                    r"(?P<target>.+?)" + tail, re.IGNORECASE)
+        self._pet_hit_in_re = re.compile(
+            TS_RE + r"(?P<source>.+?) (?P<verb>[a-z]+) "
+                    r"(?P<target>" + pet + r")" + tail, re.IGNORECASE)
+
+    def _spell_category(self, ability):
+        """"song" if we saw the ability started with "begin singing",
+        else "spell"."""
+        return self.ability_kind.get(ability, "spell")
+
+    # -- fight lifecycle -------------------------------------------------------
+    def _ensure_fight(self, wall_time):
+        if self.session_start_wall is None:
+            self.session_start_wall = wall_time
+        if self.current is not None and \
+           wall_time - self._last_activity_wall > self.idle_timeout:
+            self._end_fight()
+        if self.current is None:
+            self.current = Fight(wall_time)
+            self.current.stance = self.stance
+            self.current.invocation = self.invocation
+        self._last_activity_wall = wall_time
+        self.current.touch(wall_time)
+
+    def _end_fight(self):
+        if self.current and self.current.total_dmg_out() + self.current.total_heal_out() > 0:
+            self.current.ended = True
+            self.history.appendleft(self.current)
+            self.fights_completed += 1
+            self.combat_active_secs += self.current.elapsed()
+            you = self.current.actors.get(YOU_LABEL)
+            if you:
+                self.combat_dmg_out += you["dmg_out"]
+                self.combat_dmg_in += you["dmg_in"]
+        self.current = None
+
+    def avg_combat_dps(self):
+        """YOUR damage per second of ACTIVE combat time, across every
+        completed fight this session -- the honest 'how hard am I hitting
+        when I'm actually fighting' number for comparing sessions."""
+        return self.combat_dmg_out / self.combat_active_secs \
+            if self.combat_active_secs > 0 else 0.0
+
+    def avg_combat_dtps(self):
+        return self.combat_dmg_in / self.combat_active_secs \
+            if self.combat_active_secs > 0 else 0.0
+
+    def force_end_fight(self):
+        self._end_fight()
+        self._notify()
+
+    def maybe_timeout(self):
+        """Call periodically (e.g. from the UI tick) so a fight visibly ends
+        even if no new lines arrive to trigger _ensure_fight."""
+        if self.current and \
+           time.time() - self._last_activity_wall > self.idle_timeout:
+            self._end_fight()
+            self._notify()
+
+    def session_elapsed(self):
+        if self.session_start_wall is None:
+            return 0.001
+        end = self._last_activity_wall or time.time()
+        return max(end - self.session_start_wall, 0.001)
+
+    def kills_per_hour(self):
+        elapsed_hr = self.session_elapsed() / 3600.0
+        return len(self.kills) / elapsed_hr if elapsed_hr > 0 else 0.0
+
+    # -- rolling rates ---------------------------------------------------------
+    def _push_recent(self, key, wall_time, amount, category="melee"):
+        dq = self._recent[key]
+        dq.append((wall_time, amount, category))
+        cutoff = wall_time - ROLLING_MAX_WINDOW
+        while dq and dq[0][0] < cutoff:
+            dq.popleft()
+
+    def rolling_sum(self, key, window, now=None, cats=None):
+        """Total for You over the last `window` seconds (dmg_out / heal_out /
+        dmg_in), optionally restricted to a tuple of categories (e.g.
+        ("melee", "skill")). `now` defaults to wall-clock, which matches log
+        timestamps during live tailing."""
+        now = now if now is not None else time.time()
+        dq = self._recent[key]
+        while dq and dq[0][0] < now - ROLLING_MAX_WINDOW:
+            dq.popleft()
+        cutoff = now - window
+        return sum(a for t, a, c in dq
+                   if t >= cutoff and (cats is None or c in cats))
+
+    def _note_verb(self, verb, line):
+        if verb not in ATTACK_VERBS and verb not in self.unknown_verbs:
+            self.unmatched.append(
+                f"(new attack verb {verb!r}, counted as melee) {line}")
+        if verb not in ATTACK_VERBS:
+            self.unknown_verbs[verb] = self.unknown_verbs.get(verb, 0) + 1
+
+    # -- recording helpers -------------------------------------------------------
+    def _record_damage(self, wall_time, source, target, amount, crit=False,
+                       category="melee", ability=None, swing=True):
+        self._ensure_fight(wall_time)
+        src_label = self._n(source)
+        if self._is_pet(src_label):
+            # Your pet is its OWN actor with its own DPS/DTPS and swing
+            # stats, separate from yours. Its damage keeps whatever category
+            # it was parsed as (melee / skill / spell), so all pet damage
+            # types are captured.
+            src_label = PET_LABEL
+        src = self.current.actor(src_label)
+        src["dmg_out"] += amount
+        src["last_hit_wall"] = wall_time
+        if swing:
+            src["hits"] += 1
+            src["biggest_hit"] = max(src["biggest_hit"], amount)
+            if crit:
+                src["crits"] += 1
+                src["last_crit_wall"] = wall_time
+        src[f"{category}_dmg_out"] += amount
+        tgt_label = self._n(target)
+        if self._is_pet(tgt_label):
+            tgt_label = PET_LABEL
+        tgt = self.current.actor(tgt_label)
+        tgt["dmg_in"] += amount
+        tgt["last_hit_wall"] = max(tgt["last_hit_wall"], wall_time)
+        tgt[f"{category}_dmg_in"] += amount
+
+        if src_label == YOU_LABEL:
+            self._push_recent("dmg_out", wall_time, amount, category)
+            setattr(self, f"{category}_dmg_out",
+                    getattr(self, f"{category}_dmg_out") + amount)
+            if swing:
+                self.swings_hit += 1
+                self.biggest_hit = max(self.biggest_hit, amount)
+                if crit:
+                    self.crit_count += 1
+            ab = self.abilities_dmg.setdefault(ability or MELEE_ABILITY,
+                                               _blank_ability())
+            ab["total"] += amount
+            ab["hits"] += 1
+            ab["biggest"] = max(ab["biggest"], amount)
+            ab["category"] = category
+            if crit:
+                ab["crits"] += 1
+        elif src_label == PET_LABEL:
+            self._push_recent("pet_out", wall_time, amount, category)
+            self.pet_dmg_out += amount
+            ab = self.abilities_dmg.setdefault(
+                f"Pet: {ability or MELEE_ABILITY}", _blank_ability())
+            ab["total"] += amount
+            ab["hits"] += 1
+            ab["biggest"] = max(ab["biggest"], amount)
+            ab["category"] = "pet"
+            if crit:
+                ab["crits"] += 1
+        elif tgt_label == YOU_LABEL:
+            self._push_recent("dmg_in", wall_time, amount, category)
+            setattr(self, f"{category}_dmg_in",
+                    getattr(self, f"{category}_dmg_in") + amount)
+        if tgt_label == PET_LABEL:
+            self._push_recent("pet_in", wall_time, amount, category)
+            self.pet_dmg_in += amount
+        self._notify()
+
+    def _record_miss(self, wall_time, source, target):
+        # Misses count toward accuracy but never start or extend a fight --
+        # combat runs on damage/heal accumulation only (whiffing at a mob
+        # for 30s with no damage landing in either direction isn't a fight).
+        if self.current is None or \
+           wall_time - self._last_activity_wall > self.idle_timeout:
+            return
+        src_label = self._n(source)
+        src = self.current.actor(src_label)
+        src["misses"] += 1
+        if src_label == YOU_LABEL:
+            self.swings_missed += 1
+        self._notify()
+
+    def _record_heal(self, wall_time, source, target, amount, ability=None):
+        # Combat is damage-bounded: heals never start or extend one. They
+        # attach to the live Combat's actors if one exists, and always count
+        # toward session totals and the rolling HPS window.
+        src_label = self._n(source)
+        tgt_label = self._n(target)
+        in_combat = self.current is not None and \
+            wall_time - self._last_activity_wall <= self.idle_timeout
+        if in_combat:
+            src = self.current.actor(src_label)
+            src["heal_out"] += amount
+            src["last_hit_wall"] = wall_time
+            self.current.actor(tgt_label)["heal_in"] += amount
+
+        if src_label == YOU_LABEL:
+            self._push_recent("heal_out", wall_time, amount)
+            self.heal_out_total += amount
+            ab = self.abilities_heal.setdefault(ability or "Heal", _blank_ability())
+            ab["total"] += amount
+            ab["hits"] += 1
+            ab["biggest"] = max(ab["biggest"], amount)
+        if tgt_label == YOU_LABEL:
+            self.heal_in_total += amount
+        self._notify()
+
+    def _notify(self):
+        if self.on_change:
+            self.on_change()
+
+    def _consume_crit(self, source_label, wall_time):
+        if source_label == self._pending_crit_source and \
+           wall_time <= self._pending_crit_until:
+            self._pending_crit_source = None
+            self._pending_crit_until = 0.0
+            return True
+        return False
+
+    def _set_stance(self, wall_time, name):
+        if name != self.stance:
+            self.stance = name
+            self.stance_history.append((wall_time, name))
+            if self.current:
+                self.current.stance = name
+            self._notify()
+
+    def _set_invocation(self, wall_time, name):
+        if name != self.invocation:
+            self.invocation = name
+            self.invocation_history.append((wall_time, name))
+            if self.current:
+                self.current.invocation = name
+            self._notify()
+
+    # -- line handling -------------------------------------------------------
+    def handle_line(self, line):
+        # Use the log line's own timestamp as the clock, not real wall-clock
+        # time. For live tailing the two are nearly identical, but the
+        # session report replays an entire historical log in a fraction of
+        # a second -- wall-clock time would make the whole session look like
+        # it took milliseconds (and kills/hour would be nonsense). Log
+        # timestamps only have 1-second resolution, which is fine for fight
+        # durations and session totals.
+        wall_time = time.time()
+        m_ts = TS_ONLY_RE.match(line)
+        if m_ts:
+            try:
+                wall_time = datetime.strptime(m_ts.group("ts"), LOG_TS_FMT).timestamp()
+            except ValueError:
+                pass
+        if self.session_start_wall is None:
+            self.session_start_wall = wall_time
+
+        # session boundary: login banner -> wipe ALL session-scoped state
+        if SESSION_START_RE.match(line):
+            self._reset_session_state(wall_time)
+            return
+
+        # pet ownership announcement ("/pet leader")
+        m = PET_LEADER_RE.match(line)
+        if m:
+            if self.self_name and \
+               m.group("owner").lower() == self.self_name.lower():
+                self._register_pet(m.group("pet"))
+            return
+
+        # chat (tell/say/shout/auction) -- never combat; must come after
+        # the pet-leader "says" line above
+        if CHAT_RE.match(line):
+            return
+
+        # inline tag suffixes -- "(Critical)", "(Riposte)", ... -- strip them
+        # all before matching anything else; only Critical changes stats
+        is_crit = False
+        while True:
+            m_tag = TAG_SUFFIX_RE.match(line)
+            if not m_tag:
+                break
+            line = m_tag.group("body")
+            if m_tag.group("tag") == "Critical":
+                is_crit = True
+
+        if STANCE_CHANGING_RE.match(line) or INVOCATION_CHANGING_RE.match(line):
+            return  # "You begin to change your stance/invocation." -- no info yet
+
+        m = STANCE_ASSUME_RE.match(line)
+        if m:
+            self._set_stance(wall_time, _resolve_descriptor(m.group("descriptor"), STANCE_DESCRIPTORS))
+            return
+
+        m = INVOCATION_RECITE_RE.match(line)
+        if m:
+            self._set_invocation(wall_time, _resolve_descriptor(m.group("descriptor"), INVOCATION_DESCRIPTORS))
+            return
+
+        m = CRIT_RE.match(line)
+        if m:
+            self._pending_crit_until = wall_time + CRIT_WINDOW
+            self._pending_crit_source = self._n(m.group("source") or YOU_LABEL)
+            return
+
+        m = CASTING_RE.match(line)
+        if m:
+            who = self._n(m.group("who"))
+            spell = m.group("spell")
+            self.ability_kind[spell] = \
+                "song" if m.group("how") == "singing" else "spell"
+            self._pending_casts[who] = (spell, wall_time + CAST_WINDOW)
+            if who == YOU_LABEL:
+                self.spell_casts[spell] = self.spell_casts.get(spell, 0) + 1
+            return
+
+        m = SELF_HIT_RE.match(line)
+        if m and m.group("verb") not in NON_ATTACK_VERBS:
+            if m.group("spell") or m.group("element"):
+                # "...for N points of fire damage by Burst of Flame."
+                ability = m.group("spell") or \
+                    f"{m.group('element').capitalize()} damage"
+                category = self._spell_category(ability)
+            else:
+                self._note_verb(m.group("verb"), line)
+                category, ability = _attack_category_and_ability(m.group("verb"))
+            crit = is_crit or self._consume_crit(YOU_LABEL, wall_time)
+            self._record_damage(wall_time, YOU_LABEL, m.group("target"),
+                                int(m.group("amount")), crit=crit,
+                                category=category, ability=ability)
+            return
+
+        m = SELF_TAKEN_RE.match(line)
+        if m and m.group("verb") not in NON_ATTACK_VERBS:
+            if m.group("spell") or m.group("element"):
+                category = "spell"
+            else:
+                self._note_verb(m.group("verb"), line)
+                category, _ability = _attack_category_and_ability(m.group("verb"))
+            crit = is_crit or self._consume_crit(self._n(m.group("source")), wall_time)
+            self._record_damage(wall_time, m.group("source"), YOU_LABEL,
+                                int(m.group("amount")), crit=crit, category=category)
+            return
+
+        m = INCOMING_DOT_RE.match(line)
+        if m:
+            self._record_damage(wall_time, m.group("source") or m.group("spell"),
+                                YOU_LABEL, int(m.group("amount")),
+                                category="spell")
+            return
+
+        m = SELF_MISS_RE.match(line) or SELF_MISS_FALLBACK_RE.match(line)
+        if m:
+            self._record_miss(wall_time, YOU_LABEL, m.group("target"))
+            return
+
+        m = OTHER_MISS_ON_SELF_RE.match(line) or SELF_DODGED_FALLBACK_RE.match(line)
+        if m:
+            self._record_miss(wall_time, m.group("source"), YOU_LABEL)
+            return
+
+        m = NONMELEE_ATTR_RE.match(line)
+        if m:
+            target = m.group("target")
+            amount = int(m.group("amount"))
+            caster = m.group("caster")
+            source = YOU_LABEL if caster is None else caster
+            spell = m.group("spell")
+            crit = is_crit or self._consume_crit(self._n(source), wall_time)
+            cat = self._spell_category(spell) \
+                if self._n(source) == YOU_LABEL else "spell"
+            self._record_damage(wall_time, source, target, amount, crit=crit,
+                                category=cat, ability=spell)
+            return
+
+        m = PROC_DOT_RE.match(line)
+        if m:
+            # "An orc warrior has taken 6 damage by Weak Poison." -- no
+            # caster is named. When the target is a MOB, this is your own
+            # applied poison/proc. When the target is YOUR PET (confirmed in
+            # a real log: mobs' poisons tick on pets with this same line),
+            # it's incoming damage -- attributing it to You would inflate
+            # your spell output.
+            target = m.group("target")
+            if self._is_pet(self._n(target)):
+                self._record_damage(wall_time, "Unknown", target,
+                                    int(m.group("amount")), category="spell")
+            else:
+                self._record_damage(wall_time, YOU_LABEL, target,
+                                    int(m.group("amount")),
+                                    category=self._spell_category(m.group("spell")),
+                                    ability=m.group("spell"))
+            return
+
+        # -- third-party combat: only your own pet matters; everything else
+        #    is matched-and-ignored so groupmates' fights can't extend your
+        #    fight window or spam `unmatched` --------------------------------
+        if self._pet_hit_out_re:
+            m = self._pet_hit_out_re.match(line)
+            if m:
+                # pet damage keeps its real category (melee/skill/spell) so
+                # every pet damage type is captured; _record_damage routes
+                # pet sources to the PET actor via _is_pet()
+                if m.group("spell") or m.group("element"):
+                    category = "spell"
+                    ability = m.group("spell") or \
+                        f"{m.group('element').capitalize()} damage"
+                else:
+                    category, ability = \
+                        _attack_category_and_ability(m.group("verb"))
+                self._record_damage(wall_time, m.group("source"),
+                                    m.group("target"), int(m.group("amount")),
+                                    crit=is_crit, category=category,
+                                    ability=ability)
+                return
+            m = self._pet_hit_in_re.match(line)
+            if m:
+                category = "spell" if (m.group("spell") or m.group("element")) \
+                    else _attack_category_and_ability(m.group("verb"))[0]
+                self._record_damage(wall_time, m.group("source"),
+                                    m.group("target"), int(m.group("amount")),
+                                    category=category)
+                return
+
+        m = OTHER_DOT_RE.match(line)
+        if m:
+            if self._is_pet(self._n(m.group("target"))):
+                self._record_damage(wall_time, m.group("source"),
+                                    m.group("target"),
+                                    int(m.group("amount")), category="spell")
+            return
+
+        m = OTHER_HIT_RE.match(line)
+        if m and m.group("verb") not in NON_ATTACK_VERBS:
+            return   # someone else's fight -- not yours, not your pet's
+
+        m = OTHER_SLAIN_RE.match(line)
+        if m:
+            if self._is_pet(self._n(m.group("source"))):
+                self.kills.append(wall_time)   # your pet's kill is your kill
+                self._notify()
+            return
+
+        if REGEN_RE.match(line):
+            return   # passive regen tick announcement -- no amount, no info
+
+        m = MEND_RE.match(line)
+        if m:
+            # Mend prints no amount, so it can't contribute to HPS -- but
+            # it's still recorded as an ability use (shows in the session
+            # report with 0 healing rather than vanishing).
+            self._record_heal(wall_time, YOU_LABEL, YOU_LABEL, 0,
+                              ability="Mend")
+            return
+
+        m = DS_SELF_RE.match(line)
+        if m:
+            # your damage shield ("... is pierced by YOUR thorns for N ...")
+            self._record_damage(wall_time, YOU_LABEL, m.group("target"),
+                                int(m.group("amount")), category="ds",
+                                ability=f"Damage Shield ({m.group('kind')})",
+                                swing=False)
+            return
+
+        m = DS_TAKEN_RE.match(line)
+        if m:
+            # a mob's damage shield burning you when your hit lands
+            self._record_damage(wall_time, m.group("owner"), YOU_LABEL,
+                                int(m.group("amount")), category="ds",
+                                swing=False)
+            return
+
+        m = DS_OTHER_RE.match(line)
+        if m:
+            return   # someone else's damage shield -- matched-and-ignored
+
+        m = NONMELEE_FALLBACK_RE.match(line)
+        if m:
+            target = m.group("target")
+            amount = int(m.group("amount"))
+            source = "Spell"
+            spell = None
+            for name, (cast_spell, expires) in list(self._pending_casts.items()):
+                if wall_time <= expires and self._n(target) != name:
+                    source = name
+                    spell = cast_spell
+                    del self._pending_casts[name]
+                    break
+            crit = is_crit or self._consume_crit(self._n(source), wall_time)
+            self._record_damage(wall_time, source, target, amount, crit=crit,
+                                category="spell", ability=spell or "Unknown spell")
+            return
+
+        m = HEAL_DEALT_ATTR_RE.match(line) or HEAL_DEALT_FALLBACK_RE.match(line)
+        if m:
+            target = m.group("target")
+            if target.strip().lower() in ("yourself", "you"):
+                target = YOU_LABEL
+            spell = m.groupdict().get("spell")
+            self._record_heal(wall_time, YOU_LABEL, target, int(m.group("amount")),
+                              ability=spell)
+            return
+
+        m = HEAL_RECEIVED_ATTR_RE.match(line) or HEAL_RECEIVED_FALLBACK_RE.match(line)
+        if m:
+            spell = m.groupdict().get("spell")
+            self._record_heal(wall_time, m.group("source"), YOU_LABEL,
+                              int(m.group("amount")), ability=spell)
+            return
+
+        m = OTHER_HEAL_RE.match(line)
+        if m:
+            return   # someone healing someone else -- matched-and-ignored
+
+        m = SELF_DEATH_RE.match(line)
+        if m:
+            # the killing blow already landed via its own damage line; a
+            # death never needs to spawn a Combat by itself
+            self.deaths.append(wall_time)
+            self._notify()
+            return
+
+        m = SELF_KILL_RE.match(line)
+        if m:
+            # kill confirmations don't carry damage numbers themselves (they
+            # already landed via the hit lines that preceded this) -- just
+            # log the timestamp for the kills/hour rate.
+            self.kills.append(wall_time)
+            self._notify()
+            return
+
+        # nothing matched -- keep combat-flavored lines around for calibration
+        if re.search(r"\bdamage\b|\bheal(?:s|ed)?\b|\bslain\b|\bcritical\b"
+                     r"|\bstance\b|\binvocation\b", line, re.IGNORECASE) \
+           and TS_RE and re.match(TS_RE, line):
+            self.unmatched.append(line)
+
+    # -- views -----------------------------------------------------------------
+    def snapshot(self):
+        """Return (fight_or_None, is_live) for rendering."""
+        if self.current is not None:
+            return self.current, True
+        if self.history:
+            return self.history[0], False
+        return None, False
+
+    def ability_rows(self, metric="total", kind="dmg"):
+        """Sorted (name, stats) pairs across the whole session, ranking
+        which spell/Melee contributed the most damage or healing."""
+        src = self.abilities_dmg if kind == "dmg" else self.abilities_heal
+        return sorted(src.items(), key=lambda kv: -kv[1][metric])
+
+    def stance_performance(self):
+        """DPS/DTPS grouped by which stance was active for each *completed*
+        fight (a fight's stance is whatever was active when it started)."""
+        return self._group_fight_metric(lambda f: f.stance)
+
+    def invocation_performance(self):
+        return self._group_fight_metric(lambda f: f.invocation)
+
+    def _group_fight_metric(self, key_fn):
+        groups = {}
+        for f in self.history:
+            key = key_fn(f) or "Unknown"
+            you = f.actors.get(YOU_LABEL)
+            if not you:
+                continue
+            elapsed = f.elapsed()
+            g = groups.setdefault(key, {"fights": 0, "dps_sum": 0.0, "dtps_sum": 0.0})
+            g["fights"] += 1
+            g["dps_sum"] += you["dmg_out"] / elapsed
+            g["dtps_sum"] += you["dmg_in"] / elapsed
+        out = {}
+        for key, g in groups.items():
+            n = g["fights"]
+            out[key] = {"fights": n, "avg_dps": g["dps_sum"] / n, "avg_dtps": g["dtps_sum"] / n}
+        return out
