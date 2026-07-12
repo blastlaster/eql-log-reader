@@ -634,6 +634,11 @@ class CombatTracker:
         self._pending_crit_until = 0.0
         self._pending_crit_source = None
         self._pending_casts = {}     # name -> (spell, expires_wall)
+        # last spell damage that hit YOU -- an enemy cast lands its damage
+        # line and its cast-on-you emote in the same instant ("Asaka L`Rei
+        # hit you for 12 ... by Lifespike." + "You feel your life force
+        # drain away."), so this names otherwise-ambiguous buff messages
+        self._last_spell_on_you = None   # (spell, wall_time)
         self._last_activity_wall = 0.0
         self._last_line_wall = wall_time or 0.0   # newest log timestamp seen
         self.session_start_wall = wall_time
@@ -1004,6 +1009,13 @@ class CombatTracker:
         if pending and pending[1] + self.BUFF_CAST_SLACK >= wall_time \
            and pending[0] in candidates:
             return pending[0]
+        # an enemy cast logs its damage line in the same instant as its
+        # cast-on-you emote -- if the spell that just hit you is among the
+        # candidates, that's the one (confirmed: Lifespike's damage/heal
+        # lines bracket "You feel your life force drain away.")
+        hit = self._last_spell_on_you
+        if hit and abs(wall_time - hit[1]) <= 2.0 and hit[0] in candidates:
+            return hit[0]
         active = [c for c in candidates if c in self.active_buffs]
         if len(active) == 1:
             return active[0]
@@ -1485,6 +1497,8 @@ class CombatTracker:
         if m and m.group("verb") not in NON_ATTACK_VERBS:
             if m.group("spell") or m.group("element"):
                 category = "spell"
+                if m.group("spell"):
+                    self._last_spell_on_you = (m.group("spell"), wall_time)
             else:
                 self._note_verb(m.group("verb"), line)
                 category, _ability = _attack_category_and_ability(m.group("verb"))
@@ -1495,6 +1509,7 @@ class CombatTracker:
 
         m = INCOMING_DOT_RE.match(line)
         if m:
+            self._last_spell_on_you = (m.group("spell"), wall_time)
             self._record_damage(wall_time, m.group("source") or m.group("spell"),
                                 YOU_LABEL, int(m.group("amount")),
                                 category="spell")
