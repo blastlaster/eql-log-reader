@@ -1165,10 +1165,20 @@ class CombatTracker:
             # Instant spells (direct heals, lifetaps, ...) log a "cast on
             # you" message too, but nothing lands that could ever fade --
             # tracking them would leave immortal entries on the BUFFS list.
+            # MAJORITY of candidates instant is enough to read the message
+            # as the instant: "You feel your life force drain away." maps
+            # to ~180 spells, 137 of them instant enemy lifetaps (target
+            # type 13) vs a handful of drain-over-time variants (and one
+            # permanent self-only necro buff that used to immortalize the
+            # row). Confirmed by play: the message fires per TAP. A DoT
+            # variant's damage still records through its own damage lines.
+            # (An unambiguous or pending-resolved label has ONE candidate,
+            # so named duration'd spells are unaffected.)
             info = SPELL_DB.lookup(label)
             infos = [info] if info else \
                 [SPELL_DB.lookup(c) for c in landed]
-            if infos and all(i and i.duration_ticks() == 0 for i in infos):
+            n_inst = sum(1 for i in infos if i and i.duration_ticks() == 0)
+            if infos and all(infos) and n_inst * 2 > len(infos):
                 # ...but an instant can still be the death knell of a buff
                 # that spawns it on expiry (seed heals' "* Heal Trigger")
                 self._close_fade_trigger_parent(
