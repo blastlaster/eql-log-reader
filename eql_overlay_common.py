@@ -24,7 +24,7 @@ SEED_BYTES = 512 * 1024     # how much of the log tail to parse on startup
 # (eql_update_check.py) to decide whether a newer GitHub release exists.
 # Bump this alongside installer.iss's MyAppVersion on every release, or the
 # update check will keep comparing against a stale number.
-CURRENT_VERSION = "1.3"
+CURRENT_VERSION = "1.4"
 
 
 # ----------------------------------------------------------------------------

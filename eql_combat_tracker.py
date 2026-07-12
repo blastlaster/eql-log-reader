@@ -139,6 +139,10 @@ LOG_TS_FMT = "%a %b %d %H:%M:%S %Y"
 # session boundary -- confirmed login banner
 SESSION_START_RE = re.compile(TS_RE + r"Welcome to EverQuest Legends!\s*$")
 
+# zoning -- songs are silently stripped when you zone (no fade lines), so
+# this is a buff-list cleanup point; see _clear_stale_buffs_on_zone
+ZONE_RE = re.compile(TS_RE + r"LOADING, PLEASE WAIT\.\.\.\s*$")
+
 # Data model (per the user's spec):
 #   SESSION -- starts at "Welcome to EverQuest Legends!" (login). ALL
 #     session-scoped state resets there, so numbers never mix play sessions
@@ -309,18 +313,43 @@ CASTING_RE = re.compile(
     TS_RE + r"(?P<who>You|[A-Za-z]+) begin(?:s)? (?P<how>casting|singing) (?P<spell>.+?)\.?\s*$")
 
 # -- cast outcomes: resists / fizzles / interrupts ---------------------------
-#    Classic-EQ phrasings, NOT yet confirmed against an EQL log (same caveat
-#    tier as the other *_FALLBACK_RE patterns). If EQL words these
-#    differently, the real lines will land in `unmatched` via the widened
-#    calibration keyword filter below -- promote them here once seen.
+#    EQL's real phrasings, confirmed from calibration-tab lines (2026-07-11
+#    log) -- all three carry the SPELL NAME, unlike the nameless classic-EQ
+#    forms, so outcomes attribute per spell:
+#      A dry bone skeleton resisted your Fingers of Fire!
+#      Your Cascade of Hail spell fizzles!
+#      Your Force Snap spell is interrupted.
+#      You resist a lesser mummy's Rabies!      (incoming resist)
+#      Your melody has been interrupted!        (bard song interrupt)
+#    Third parties' outcomes are also logged ("Henelope's Convoke Shadow
+#    spell fizzles!") -- matched-and-ignored, except that they cancel that
+#    caster's pending-cast attribution window. The classic nameless forms
+#    stay as fallback alternations (harmless if EQL never emits them).
 RESIST_OUT_RE = re.compile(       # a mob shrugging off YOUR spell
+    TS_RE + r"(?P<target>.+?) resisted your (?P<spell>.+?)!\s*$")
+RESIST_OUT_CLASSIC_RE = re.compile(
     TS_RE + r"Your target resisted the (?P<spell>.+?) spell\.?\s*$")
-RESIST_IN_RE = re.compile(        # you shrugging off a mob's spell
+RESIST_IN_RE = re.compile(        # you shrugging off a mob's spell --
+    TS_RE + r"You resist (?P<source>.+?)[`']s (?P<spell>.+?)!\s*$")  # confirmed
+RESIST_IN_CLASSIC_RE = re.compile(
     TS_RE + r"You resist the (?P<spell>.+?) spell!?\s*$")
 FIZZLE_RE = re.compile(
-    TS_RE + r"(?:Your spell fizzles!?|You miss a note, bringing your song to a close!?)\s*$")
+    TS_RE + r"(?:Your (?:(?P<spell>.+?) )?spell fizzles!?"
+            r"|You miss a note, bringing your song to a close!?)\s*$")
+OTHER_FIZZLE_RE = re.compile(
+    TS_RE + r"(?P<who>.+?)[`']s (?:.+? )?spell fizzles!?\s*$")
 INTERRUPT_RE = re.compile(
-    TS_RE + r"(?:Your spell is interrupted\.?|Your casting has been interrupted!?)\s*$")
+    TS_RE + r"(?:Your (?:(?P<spell>.+?) )?spell is interrupted\.?"
+            r"|Your melody has been interrupted!?"      # confirmed (songs)
+            r"|Your casting has been interrupted!?)\s*$")
+OTHER_INTERRUPT_RE = re.compile(
+    TS_RE + r"(?P<who>.+?)[`']s (?:.+? )?spell is interrupted\.?\s*$")
+# The Budding Heal line's delayed-heal trigger firing on someone else
+# ("Dizzi is healed from within.") -- no amount, no caster; on YOU it logs
+# "The heal within you blooms." instead (handled by the buff-message
+# tables). Matched-and-ignored so it can't pollute `unmatched`.
+HEAL_WITHIN_RE = re.compile(
+    TS_RE + r".+? is healed from within\.?\s*$")
 
 # -- third-party combat (confirmed logged in EQL: group members, their pets,
 #    and mobs fighting each other all appear in full). Only lines involving
@@ -346,8 +375,11 @@ OTHER_HEAL_RE = re.compile(
 #    rather than silently dropped; there is nothing numeric to add to HPS.
 MEND_RE = re.compile(TS_RE + r"You mend your wounds and heal some damage\.?\s*$")
 
-# -- passive regen announcement -- confirmed: "Your wounds begin to heal."
-#    Carries no amount; matched-and-ignored so it stays out of `unmatched`.
+# -- "Your wounds begin to heal." is NOT a passive-regen announcement: it's
+#    the cast-on-you message of the Hymn of Restoration / Elixir / Pact
+#    heal-over-time lines (per spells_us_str.txt), so the buff tables must
+#    get it first. This fallback only ignores it when the client's str file
+#    is unavailable, keeping it out of `unmatched` either way.
 REGEN_RE = re.compile(TS_RE + r"Your wounds begin to heal\.?\s*$")
 
 # -- pet ownership -- confirmed: "Jenann says, 'My leader is Monomate.'"
@@ -380,7 +412,7 @@ GAIN_LEVEL_RE = re.compile(
 #    Checked AFTER PET_LEADER_RE, which is itself a "says" line.
 CHAT_RE = re.compile(
     TS_RE + r"(?:You|[A-Za-z][A-Za-z` ]{0,40}?) "
-            r"(?:say|says|told|tells|shout|shouts|auction|auctions)\b"
+            r"(?:say|says|tells|tell|told|shout|shouts|auction|auctions)\b"
             r"[^,]{0,40}, '")
 
 # -- damage shields -- confirmed third-party format: "A rattlesnake is
@@ -632,11 +664,13 @@ class CombatTracker:
         self.abilities_dmg = {}      # ability name -> _blank_ability()
         self.abilities_heal = {}     # ability name -> _blank_ability()
         self.spell_casts = {}        # spell name -> cast count
-        # cast outcomes (classic-format lines; see RESIST_OUT_RE etc.)
+        # cast outcomes (see RESIST_OUT_RE etc.)
         self.spell_resists = {}      # spell name -> times a mob resisted it
         self.resists_incoming = 0    # spells YOU shrugged off
-        self.fizzles = 0
+        self.fizzles = 0             # session totals...
         self.interrupts = 0
+        self.spell_fizzles = {}      # ...and per-spell, from the named
+        self.spell_interrupts = {}   # EQL phrasings
         # buffs/debuffs on YOU, recognized by exact match against the
         # spell file's own "cast on you" / "fades" messages (see
         # SpellDB.buff_landed_candidates). Labels are a spell name when the
@@ -943,24 +977,48 @@ class CombatTracker:
     # naming an ambiguous landed-message for this much longer.
     BUFF_CAST_SLACK = 8.0
 
-    def _resolve_buff_label(self, candidates, wall_time, fading):
-        """Pick a display label for a buff message that maps to one or more
-        spells. Unambiguous -> the spell name. Ambiguous -> a recent cast
-        of ours that's among the candidates, else a candidate already
-        tracked as active (recast/fade of the same thing), else None (the
-        caller falls back to quoting the message text -- honest, never a
-        guess)."""
+    def _resolve_buff_label(self, candidates, wall_time):
+        """Pick a display label for a landed buff message that maps to one
+        or more spells. Unambiguous -> the spell name. Ambiguous -> a
+        recent cast of ours that's among the candidates, else a candidate
+        already tracked as active (recast of the same thing), else None
+        (the caller falls back to quoting the message text -- honest,
+        never a guess)."""
         if len(candidates) == 1:
             return candidates[0]
         pending = self._pending_casts.get(YOU_LABEL)
-        if not fading and pending \
-           and pending[1] + self.BUFF_CAST_SLACK >= wall_time \
+        if pending and pending[1] + self.BUFF_CAST_SLACK >= wall_time \
            and pending[0] in candidates:
             return pending[0]
         active = [c for c in candidates if c in self.active_buffs]
         if len(active) == 1:
             return active[0]
         return None
+
+    def _buff_est_end(self, label, cand_filter=None):
+        """Estimated natural-expiry wall time of an active buff label, or
+        None when unknowable (not active, permanent, or candidates
+        disagree). Quoted-message labels use their candidates' shared
+        duration estimate -- ambiguity doesn't matter when every candidate
+        would expire at the same time. `cand_filter` narrows a quoted
+        label's candidates (e.g. to the ones a fade message could mean)."""
+        start = self.active_buffs.get(label)
+        if start is None:
+            return None
+        lvl = self.player_level or 50
+        info = SPELL_DB.lookup(label)
+        if info:
+            dur = info.duration_seconds(lvl)
+        else:
+            cands = self._active_buff_cands.get(label) or set()
+            if cand_filter:
+                cands = cands & set(cand_filter)
+            durs = {(i.duration_seconds(lvl) if i else None)
+                    for i in (SPELL_DB.lookup(c) for c in cands)}
+            dur = durs.pop() if len(durs) == 1 else None
+        if not dur or dur <= 0:      # unknown, instant, or permanent
+            return None
+        return start + dur
 
     def _close_buff(self, label, wall_time):
         start = self.active_buffs.pop(label, None)
@@ -969,35 +1027,119 @@ class CombatTracker:
             self.buff_uptime[label] = \
                 self.buff_uptime.get(label, 0.0) + max(wall_time - start, 0.0)
 
+    def _clear_stale_buffs_on_zone(self, wall_time):
+        """Zoning silently strips bard songs (regular buffs persist), and
+        the log prints no fade lines for them. Close an active entry when
+        NO reading of it could still be up after the zone: every candidate
+        is a song, instant, or already past its own duration estimate.
+        Anything that might legitimately persist (permanent, unknown
+        duration, still inside its estimate) stays."""
+        lvl = self.player_level or 50
+        song_names = SPELL_DB.bard_song_names()
+
+        def could_survive(name, start):
+            if name.lower() in song_names:
+                return False         # songs never survive a zone
+            info = SPELL_DB.lookup(name)
+            if info is None:
+                return True          # unknown spell -- assume it can
+            dur = info.duration_seconds(lvl)
+            if dur == -1:
+                return True          # permanent until removed
+            if dur <= 0:
+                return False         # instant -- was never really up
+            return start + dur > wall_time   # inside its estimate?
+
+        for label in list(self.active_buffs):
+            start = self.active_buffs[label]
+            if label.startswith('"'):
+                names = self._active_buff_cands.get(label) or ()
+                survives = any(could_survive(n, start) for n in names) \
+                    if names else True
+            else:
+                survives = could_survive(label, start)
+            if not survives:
+                self._close_buff(label, wall_time)
+                self.buff_events.append((wall_time, label, "faded"))
+
+    def _clear_all_buffs(self, wall_time):
+        """Death strips every buff and debuff, but the log prints no fade
+        messages for them -- close them all here so the BUFFS list doesn't
+        carry ghosts past the respawn. Uptime stretches are banked as
+        usual; buff_fades counts stay untouched (they count actual fade
+        messages, and death isn't one)."""
+        for label in list(self.active_buffs):
+            self._close_buff(label, wall_time)
+            self.buff_events.append((wall_time, label, "faded"))
+
     def _handle_buff_message(self, wall_time, body):
         """Try `body` (line text after the timestamp, tags stripped)
         against the spell file's cast-on-you / fade message tables.
         Returns True if the line was recognized as a buff event."""
-        candidates = SPELL_DB.buff_landed_candidates(body)
-        if candidates:
-            label = self._resolve_buff_label(candidates, wall_time, False) \
+        landed = SPELL_DB.buff_landed_candidates(body)
+        faded = SPELL_DB.buff_faded_candidates(body)
+        if landed and faded:
+            # The same text can be one spell's landed message AND another's
+            # fade message ("You slow down." = a snare landing OR the
+            # Selo's-line run speed fading). If something currently active
+            # could be the fading spell, read it as the fade; otherwise
+            # nothing matching is up, so it must be the landing.
+            fade_set = set(faded)
+            could_fade = any(
+                lbl in fade_set
+                or (self._active_buff_cands.get(lbl) or set()) & fade_set
+                for lbl in self.active_buffs)
+            if could_fade:
+                landed = None
+            else:
+                faded = None
+        if landed:
+            label = self._resolve_buff_label(landed, wall_time) \
                 or f'"{body.strip()}"'
+            # Instant spells (direct heals, lifetaps, ...) log a "cast on
+            # you" message too, but nothing lands that could ever fade --
+            # tracking them would leave immortal entries on the BUFFS list.
+            info = SPELL_DB.lookup(label)
+            infos = [info] if info else \
+                [SPELL_DB.lookup(c) for c in landed]
+            if infos and all(i and i.duration_ticks() == 0 for i in infos):
+                return True
             if label in self.active_buffs:  # recast before it faded --
                 self._close_buff(label, wall_time)  # bank the stretch
             self.active_buffs[label] = wall_time
-            self._active_buff_cands[label] = set(candidates)
+            self._active_buff_cands[label] = set(landed)
             self.buff_gains[label] = self.buff_gains.get(label, 0) + 1
             self.buff_events.append((wall_time, label, "gained"))
             self._notify()
             return True
-        candidates = SPELL_DB.buff_faded_candidates(body)
-        if candidates:
-            label = self._resolve_buff_label(candidates, wall_time, True)
-            if label is None:
-                # No direct name match -- pair through candidate overlap:
-                # a fade message and its landed message name the same
-                # spell(s), so an active (possibly quoted-message) label
-                # whose candidate set intersects ours is the same buff.
-                cand_set = set(candidates)
-                overlap = [lbl for lbl, cs in self._active_buff_cands.items()
-                           if cs & cand_set]
-                label = overlap[0] if len(overlap) == 1 \
+        if faded:
+            cand_set = set(faded)
+            # Active labels this fade could close: tracked under a candidate
+            # name, or under a quoted landed-message whose candidate set
+            # intersects ours (a fade and its landed message name the same
+            # spell(s)).
+            matches = [lbl for lbl in self.active_buffs
+                       if lbl in cand_set
+                       or (self._active_buff_cands.get(lbl) or set()) & cand_set]
+            if len(matches) == 1:
+                label = matches[0]
+            elif matches:
+                # Several active buffs share this fade message ("Your surge
+                # of strength fades." = Anthem de Arms AND Yaulp) -- only
+                # one actually ended: the one nearest its estimated natural
+                # end. Permanent/unknown-duration matches score last; if no
+                # match has a usable estimate, close nothing and record the
+                # fade under the quoted text (honest, never a guess).
+                def _score(lbl):
+                    end = self._buff_est_end(lbl, cand_set)
+                    return abs(wall_time - end) if end is not None \
+                        else float("inf")
+                best = min(matches, key=_score)
+                label = best if _score(best) != float("inf") \
                     else f'"{body.strip()}"'
+            else:
+                # nothing active matches -- still count the fade
+                label = faded[0] if len(faded) == 1 else f'"{body.strip()}"'
             self._close_buff(label, wall_time)
             self.buff_fades[label] = self.buff_fades.get(label, 0) + 1
             self.buff_events.append((wall_time, label, "faded"))
@@ -1028,6 +1170,15 @@ class CombatTracker:
     def _notify(self):
         if self.on_change:
             self.on_change()
+
+    def _drop_pending_cast(self, who, spell=None):
+        """Cancel `who`'s begin-casting attribution window -- their cast
+        fizzled or was interrupted, so nothing can land from it. A named
+        outcome line only cancels a matching pending spell; the nameless
+        classic forms cancel whatever is pending."""
+        pending = self._pending_casts.get(who)
+        if pending and (spell is None or pending[0] == spell):
+            del self._pending_casts[who]
 
     def _consume_crit(self, source_label, wall_time):
         if source_label == self._pending_crit_source and \
@@ -1076,6 +1227,10 @@ class CombatTracker:
         # session boundary: login banner -> wipe ALL session-scoped state
         if SESSION_START_RE.match(line):
             self._reset_session_state(wall_time)
+            return
+
+        if ZONE_RE.match(line):
+            self._clear_stale_buffs_on_zone(wall_time)
             return
 
         # pet ownership announcement ("/pet leader")
@@ -1147,26 +1302,48 @@ class CombatTracker:
                 self.spell_casts[spell] = self.spell_casts.get(spell, 0) + 1
             return
 
-        # cast outcomes: resists / fizzles / interrupts (classic phrasings,
-        # unconfirmed for EQL -- see the regex block for the caveat)
-        m = RESIST_OUT_RE.match(line)
+        # cast outcomes: resists / fizzles / interrupts (EQL phrasings --
+        # see the regex block). A fizzled/interrupted cast never lands, so
+        # the caster's pending-cast window is cancelled too: later damage
+        # or an ambiguous buff-landed line must not attribute to it.
+        m = RESIST_OUT_RE.match(line) or RESIST_OUT_CLASSIC_RE.match(line)
         if m:
             spell = m.group("spell")
             self.spell_resists[spell] = self.spell_resists.get(spell, 0) + 1
             self._notify()
             return
-        if RESIST_IN_RE.match(line):
+        if RESIST_IN_RE.match(line) or RESIST_IN_CLASSIC_RE.match(line):
             self.resists_incoming += 1
             self._notify()
             return
-        if FIZZLE_RE.match(line):
+        m = FIZZLE_RE.match(line)
+        if m:
             self.fizzles += 1
+            spell = m.group("spell")
+            if spell:
+                self.spell_fizzles[spell] = \
+                    self.spell_fizzles.get(spell, 0) + 1
+            self._drop_pending_cast(YOU_LABEL, spell)
             self._notify()
             return
-        if INTERRUPT_RE.match(line):
+        m = INTERRUPT_RE.match(line)
+        if m:
             self.interrupts += 1
+            spell = m.group("spell")
+            if spell:
+                self.spell_interrupts[spell] = \
+                    self.spell_interrupts.get(spell, 0) + 1
+            self._drop_pending_cast(YOU_LABEL, spell)
             self._notify()
             return
+        m = OTHER_FIZZLE_RE.match(line) or OTHER_INTERRUPT_RE.match(line)
+        if m:
+            # third party's failed cast -- not counted, but their pending
+            # cast can't be allowed to soak up later attribution
+            self._drop_pending_cast(self._n(m.group("who")))
+            return
+        if HEAL_WITHIN_RE.match(line):
+            return   # delayed-heal trigger on someone else -- no amount to record
 
         m = SELF_HIT_RE.match(line)
         if m and m.group("verb") not in NON_ATTACK_VERBS:
@@ -1301,9 +1478,6 @@ class CombatTracker:
                 self._notify()
             return
 
-        if REGEN_RE.match(line):
-            return   # passive regen tick announcement -- no amount, no info
-
         m = MEND_RE.match(line)
         if m:
             # Mend prints no amount, so it can't contribute to HPS -- but
@@ -1377,6 +1551,7 @@ class CombatTracker:
             # the killing blow already landed via its own damage line; a
             # death never needs to spawn a Combat by itself
             self.deaths.append(wall_time)
+            self._clear_all_buffs(wall_time)
             self._notify()
             return
 
@@ -1395,6 +1570,9 @@ class CombatTracker:
         m_body = TS_ONLY_RE.match(line)
         if m_body and self._handle_buff_message(wall_time, line[m_body.end():]):
             return
+
+        if REGEN_RE.match(line):
+            return   # HoT tick with spells_us_str.txt unavailable -- see REGEN_RE
 
         # nothing matched -- keep combat-flavored lines around for calibration
         if re.search(r"\bdamage\b|\bheal(?:s|ed)?\b|\bslain\b|\bcritical\b"

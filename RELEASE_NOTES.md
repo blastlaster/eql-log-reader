@@ -1,3 +1,34 @@
+# EQL Log Reader — v1.4 (in progress)
+
+## What's new in v1.4
+
+**Buff list no longer keeps ghosts after you die.** Death strips every buff and debuff in game, but the log prints no fade messages for them — the meter's BUFFS block used to carry the whole pre-death list (with `+elapsed` / `?` timers) until the next recast. "You have been slain..." now clears the tracked list; uptime accounting banks the stretch as usual.
+
+**Instant spells no longer land on the buff list.** Direct heals, lifetaps, and nukes log a "cast on you" message just like buffs do (e.g. Light Healing's "You feel a little better."), but nothing lands that could ever fade — they used to sit on the BUFFS list forever as `+elapsed` entries. Messages whose spell candidates are all instant are now skipped.
+
+**Resists, fizzles, and interrupts now use EQL's real phrasings — and attribute per spell.** v1.3 shipped classic-EQ guesses; calibration lines from a real log confirmed EQL's actual forms, which all carry the spell name:
+- `A dry bone skeleton resisted your Fingers of Fire!`
+- `Your Cascade of Hail spell fizzles!`
+- `Your Force Snap spell is interrupted.`
+
+The Session Report's Spells cast table gains **Fizzled** and **Interrupted** columns next to Resisted (the Casts column keeps counting attempts — a fizzled or interrupted cast still logged "You begin casting..."). Third parties' fizzles/interrupts (`Henelope's Convoke Shadow spell fizzles!`) are recognized and ignored. A failed cast also cancels its attribution window, so damage or an ambiguous buff-landed line right after a fizzle can no longer be pinned on the dead cast. The classic nameless phrasings remain as fallbacks.
+
+Two more confirmed from a later log: **incoming resists** use `You resist a lesser mummy's Rabies!` (counted in "Resisted by you"), and **bard song interruptions** log `Your melody has been interrupted!` (counted with interrupts).
+
+**Misc.** "... is healed from within." (the Budding Heal line's delayed-heal trigger firing on someone else) is recognized and ignored instead of landing in the calibration tab; first-person chat ("You tell General:1, ...") no longer leaks into the calibration tab when it quotes combat words.
+
+**Buff tracking survives auto-played bard songs (Symphonic Aura).** The aura logs no "You begin singing..." lines — only the pulse and fade messages — which exposed three tracking bugs, confirmed against a real log:
+
+- *A message can be one spell's landing AND another's fade.* "You slow down." is the cast-on-you text of 28 snare/slow spells **and** the fade text of the Selo's run-speed line. It was always read as a debuff landing, so Selo's fading created a phantom up-counting debuff row and left the real Selo's entry open forever. Dual-meaning messages now read as the fade when something active matches the fade candidates, and as the landing otherwise. (Tradeoff: a snare landing *while* Selo's runs is misread as the Selo's fade — the next pulse re-opens Selo's 6s later.)
+- *A fade message shared by two active buffs closed neither.* "Your surge of strength fades." means Anthem de Arms or Yaulp; with both up, the tracker refused to guess and Anthem ghosted at `?` forever. Ties now resolve to the active buff nearest its estimated natural end (permanent/unknown-duration buffs sort last; still no guess if nothing has a usable estimate). Also fixes DoTs: "You feel better." now closes Infectious Cloud instead of being misread as a Light Healing landing.
+- *"Your wounds begin to heal." is not passive regen.* An old pattern ate it as an amountless regen tick; it's actually the Hymn of Restoration / Elixir / Pact HoT landing message, and now reaches the buff tracker (the old pattern remains as a fallback when the client's string file is missing).
+
+**Zoning cleans up the buff list.** Songs are silently stripped when you zone — no fade lines — so Anthem/Hymn/Selo's ghosted through every zone change. "LOADING, PLEASE WAIT..." now closes any tracked entry that can't still be up on the other side: everything it could be is a song, instant, or already past its own duration estimate. Buffs that might legitimately persist (permanent, unknown duration, still inside their estimate) ride through untouched, exactly like the game does it.
+
+**Spell-message tables respect EQL's level 50 cap.** Player spells gated above 50 exist in the Live-era data files but can never occur on EQL — they only added false ambiguity to shared messages (Live's L77 Selo's Accelerating Canto shadowing the real L5 Accelerando). They're now dropped at load; mob-only spells are kept, since their debuff messages on you are real. On top of that, an ambiguous (quoted) buff whose remaining candidates all share one duration estimate now shows a real countdown instead of `+elapsed` — whichever spell it is, it ends at the same time.
+
+---
+
 # EQL Log Reader — v1.3
 
 **Release date:** July 11, 2026

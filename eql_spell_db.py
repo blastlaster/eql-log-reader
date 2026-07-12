@@ -107,6 +107,11 @@ IDX_TIMER_ID = 97        # shared reuse-timer group for disciplines
 IDX_IS_DISCIPLINE = 98   # 1 = combat-window discipline, not a spell gem
 MIN_FIELDS = IDX_IS_DISCIPLINE + 1
 
+# EQL is a level-50-capped server (see eql_verified_spells) -- player spells
+# gated above this level exist in the Live-era data files but can never be
+# cast there.
+EQL_LEVEL_CAP = 50
+
 # Target-type ids (column 30) -- names from eql-info's app.py (standard EQ
 # SpellTargetType enum). The two that matter for log analysis:
 #   13 = Lifetap (damage that heals the caster), 20 = targeted-AE lifetap.
@@ -646,6 +651,12 @@ class SpellInfo:
         lvl = self.classes[idx]
         return lvl if lvl not in (254, 255) else None
 
+    def min_player_level(self):
+        """Lowest level at which ANY player class gets this spell, or None
+        when no player class can use it (mob/proc/item-only spells)."""
+        lvls = [l for l in self.classes if 0 <= l <= 125]
+        return min(lvls) if lvls else None
+
     def hp_effects(self):
         """Effects carrying an HP magnitude -- SPA 0 (the generic heal/
         damage slot), SPA 79 (instant HP), and SPA 100 (heal-over-time).
@@ -834,6 +845,16 @@ class SpellDB:
                         continue    # header row ("SPELLINDEX^...") or junk
                     info = self._by_id.get(sid)
                     if info is None:
+                        continue
+                    # A player spell above EQL's level cap cannot occur on
+                    # the L50 server -- keeping it only adds false ambiguity
+                    # to shared messages (Live's L77 "Selo's Accelerating
+                    # Canto" shares "Your feet move faster." with the real
+                    # L5 Accelerando, wrecking the shared-duration estimate).
+                    # Mob-only spells (no player class) stay: their debuff
+                    # messages on you are real.
+                    mpl = info.min_player_level()
+                    if mpl is not None and mpl > EQL_LEVEL_CAP:
                         continue
                     # cols: 1=you cast, 2=other casts, 3=cast ON you,
                     #       4=cast on other, 5=fades

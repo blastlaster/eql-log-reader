@@ -907,12 +907,15 @@ def _report_window(ctx, settings):
     casts_hdr.pack(fill="x")
     casts_tree = ttk.Treeview(casts_col,
                               columns=("count", "mana", "cast", "recast",
-                                       "duration", "resisted"),
+                                       "duration", "resisted", "fizzled",
+                                       "interrupted"),
                               show="tree headings", height=8)
     for col, label, w in (("count", "Casts", 50), ("mana", "Mana", 50),
                           ("cast", "Cast", 55), ("recast", "Recast", 60),
                           ("duration", "Duration", 70),
-                          ("resisted", "Resisted", 60)):
+                          ("resisted", "Resisted", 60),
+                          ("fizzled", "Fizzled", 55),
+                          ("interrupted", "Interrupted", 75)):
         casts_tree.heading(col, text=label)
         casts_tree.column(col, width=w, anchor="center")
     casts_tree.column("#0", width=170)
@@ -1244,8 +1247,9 @@ def _report_window(ctx, settings):
                  f"estimated at L{est_level}"
                  + ("" if tracker.player_level else " -- level unknown, "
                     "refresh /who in-game to pin it") + ")")
-        # resisted-but-never-begun spells still deserve a row
-        cast_names = set(tracker.spell_casts) | set(tracker.spell_resists)
+        # spells only seen failing (resist/fizzle/interrupt) still get a row
+        cast_names = set(tracker.spell_casts) | set(tracker.spell_resists) \
+            | set(tracker.spell_fizzles) | set(tracker.spell_interrupts)
         for name in sorted(cast_names,
                            key=lambda n: -tracker.spell_casts.get(n, 0)):
             count = tracker.spell_casts.get(name, 0)
@@ -1255,8 +1259,11 @@ def _report_window(ctx, settings):
             recast = f"{info.recast_time_s:g}s" if info else ""
             dur = _fmt_dur(info.duration_seconds(est_level)) if info else ""
             resisted = tracker.spell_resists.get(name, "") or ""
+            fizzled = tracker.spell_fizzles.get(name, "") or ""
+            interrupted = tracker.spell_interrupts.get(name, "") or ""
             striped_insert(casts_tree, name,
-                           (count, mana, cast, recast, dur, resisted))
+                           (count, mana, cast, recast, dur, resisted,
+                            fizzled, interrupted))
         outcomes_lbl.config(
             text=f"Fizzles: {tracker.fizzles}   "
                  f"Interrupts: {tracker.interrupts}   "

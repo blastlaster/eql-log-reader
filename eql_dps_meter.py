@@ -307,13 +307,23 @@ def _buff_display_rows(tracker, max_rows=6):
       ?     -- past its estimated end but no fade message seen yet
       perm  -- permanent until removed
       +1:07 -- unknown duration (ambiguous message / not in the spell
-               file); shows time since it landed instead"""
+               file); shows time since it landed instead
+    A quoted-message label (spell ambiguous) still gets a real countdown
+    when every candidate spell shares one duration estimate -- whole spell
+    lines share a message AND a duration formula, so which spell it is
+    doesn't change when it ends."""
     now = time.time()
     lvl = tracker.player_level or 50
     rows = []
     for label, start in tracker.active_buffs.items():
         info = SPELL_DB.lookup(label)
         dur = info.duration_seconds(lvl) if info else 0
+        if not info:
+            cands = tracker._active_buff_cands.get(label) or ()
+            durs = {(i.duration_seconds(lvl) if i else None)
+                    for i in (SPELL_DB.lookup(c) for c in cands)}
+            if len(durs) == 1 and None not in durs:
+                dur = durs.pop()
         if dur and dur > 0:
             rem = dur - (now - start)
             if rem <= 0:
