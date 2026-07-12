@@ -28,18 +28,25 @@ DTPS with melee/spell/song/damage-shield splits, damage sources split six
 ways (Melee / Skill / Spell / Song / DS / Pet), your pet tracked as its own
 actor, accuracy/crit/biggest-hit, kill rate, stance & invocation tracking,
 and a persistent ALL TIME block (lifetime accuracy, crits, biggest hit,
-kills, and share of combat time per stance/invocation). Rates divide by
+kills, and share of combat time per stance/invocation). A BUFFS block
+lists the buffs/debuffs currently on you with estimated countdowns
+(durations from the spell file; the log's buff lines carry no spell name,
+so they're attributed via `spells_us_str.txt` messages). Rates divide by
 *active* combat time — downtime between chained pulls is capped out, so the
 numbers reflect how hard you actually hit. Right-click for options: themes,
 vertical/horizontal layout, fight-average vs rolling 10s/30s windows,
-DPS vs DPM units, combat timeout (5–60s), size, and opacity.
+DPS vs DPM units, combat timeout (5–60s), size, opacity, and the buff
+block on/off.
 
 **Session Report** (`eql_session_report.py`) — deep-dive companion:
 damage/healing by ability with category filter and search, bar-chart graphs
 (damage by ability, DPS per fight), session-vs-session comparison with
 best-session stars, persistent personal records, stance/invocation
-performance, spells cast (with mana/cast/recast from `spells_us.txt`), and
-an unrecognized-line calibration tab.
+performance, spells cast (mana/cast/recast/duration from `spells_us.txt`,
+plus per-spell resist counts and fizzle/interrupt totals), buff/debuff
+uptime on you (log lines like "You feel armored." carry no spell name — the
+report attributes them via the game's own `spells_us_str.txt` message
+table), and an unrecognized-line calibration tab.
 
 Shared library code (not run directly): `eql_overlay_common.py` (log
 tailing, settings, themes), `eql_combat_tracker.py` (the combat parser),
@@ -101,8 +108,20 @@ Log-line formats were calibrated against real gameplay logs; anything the
 parser doesn't recognize lands in the "Unrecognized lines" tab (Session
 Report) or the meter's calibration window rather than being silently
 dropped — check there first if a number looks off. Stance/invocation
-*effects* come from eqlwiki.com; spell magnitude estimates use classic-era
-EQEmu reference math and are labeled as estimates in the UI.
+*effects* come from eqlwiki.com; spell magnitude and buff-duration
+estimates use classic-era EQEmu reference math and are labeled as
+estimates in the UI. Spell-file mechanics (song/lifetap/discipline flags,
+target and resist types, the full SPA effect table, buff message strings,
+wiki-verified spell lists) follow the reverse-engineered format documented
+by the EQL Spell Explorer project (github.com/Amerzel/eql-info).
+
+The spell-data features read `spells_us.txt` / `spells_us_str.txt` from
+your EQL install (found automatically); without them those features
+quietly degrade while combat parsing works as normal. Duration estimates
+scale by your character level once the log reveals it — run a plain
+`/who` once per session to pin it (the Friends Overlay macro's
+`/who friend all` does not include yourself); until then estimates
+assume L50.
 
 Settings, rosters, personal records, and all-time stats are stored as JSON
 files next to the scripts and are intentionally not part of this

@@ -900,21 +900,61 @@ def _report_window(ctx, settings):
     setup_stripes(heal_tree)
 
     casts_col = tk.Frame(lower, bg=BG)
-    casts_col.pack(side="left", fill="both", expand=True)
-    tk.Label(casts_col, text="Spells cast (mana/cast/recast from "
-                             "spells_us.txt)", font=FONT_TITLE, bg=BG,
-             fg=INK, anchor="w").pack(fill="x")
+    casts_col.pack(side="left", fill="both", expand=True, padx=(0, 4))
+    casts_hdr = tk.Label(casts_col,
+                         text="Spells cast (spell data from spells_us.txt)",
+                         font=FONT_TITLE, bg=BG, fg=INK, anchor="w")
+    casts_hdr.pack(fill="x")
     casts_tree = ttk.Treeview(casts_col,
-                              columns=("count", "mana", "cast", "recast"),
+                              columns=("count", "mana", "cast", "recast",
+                                       "duration", "resisted"),
                               show="tree headings", height=8)
-    for col, label, w in (("count", "Casts", 55), ("mana", "Mana", 60),
-                          ("cast", "Cast", 70), ("recast", "Recast", 70)):
+    for col, label, w in (("count", "Casts", 50), ("mana", "Mana", 50),
+                          ("cast", "Cast", 55), ("recast", "Recast", 60),
+                          ("duration", "Duration", 70),
+                          ("resisted", "Resisted", 60)):
         casts_tree.heading(col, text=label)
         casts_tree.column(col, width=w, anchor="center")
-    casts_tree.column("#0", width=180)
+    casts_tree.column("#0", width=170)
     casts_tree.heading("#0", text="Spell")
     casts_tree.pack(fill="both", expand=True, pady=(2, 0))
     setup_stripes(casts_tree)
+    outcomes_lbl = tk.Label(casts_col, text="", font=FONT_SMALL, bg=BG,
+                            fg=SUBTLE, anchor="w")
+    outcomes_lbl.pack(fill="x")
+
+    def _fmt_dur(secs):
+        if secs is None or secs == 0:
+            return ""
+        if secs < 0:
+            return "perm"
+        secs = int(secs)
+        if secs >= 60:
+            m, s = divmod(secs, 60)
+            return f"{m}m {s}s" if s else f"{m}m"
+        return f"{secs}s"
+
+    buffs_col = tk.Frame(lower, bg=BG)
+    buffs_col.pack(side="left", fill="both", expand=True)
+    tk.Label(buffs_col, text="Buffs/debuffs on you (matched via "
+                             "spells_us_str.txt messages)",
+             font=FONT_TITLE, bg=BG, fg=INK, anchor="w").pack(fill="x")
+    buffs_tree = ttk.Treeview(buffs_col,
+                              columns=("gained", "faded", "uptime"),
+                              show="tree headings", height=8)
+    for col, label, w in (("gained", "Gained", 55), ("faded", "Faded", 55),
+                          ("uptime", "Uptime", 80)):
+        buffs_tree.heading(col, text=label)
+        buffs_tree.column(col, width=w, anchor="center")
+    buffs_tree.column("#0", width=190)
+    buffs_tree.heading("#0", text="Spell / message")
+    buffs_tree.pack(fill="both", expand=True, pady=(2, 0))
+    setup_stripes(buffs_tree)
+    tk.Label(buffs_col, text="An * marks a buff still active at the last "
+                             "log line. Quoted rows are messages shared by "
+                             "several spells (no unambiguous name).",
+             font=FONT_SMALL, bg=BG, fg=SUBTLE, anchor="w",
+             wraplength=380, justify="left").pack(fill="x")
 
     def refresh_ability_tables(*_):
         tracker = state["tracker"]
@@ -927,7 +967,8 @@ def _report_window(ctx, settings):
             striped_insert(dmg_tree, name, (
                 _fmt_num(s["total"]), s["hits"], s["crits"],
                 _fmt_num(s["biggest"]),
-                CATEGORY_LABELS.get(s["category"], s["category"])))
+                CATEGORY_LABELS.get(s["category"], s["category"])
+                + (" (proc)" if s.get("proc") else "")))
         heal_tree.delete(*heal_tree.get_children())
         needle = filter_text.get().strip().lower()
         for name, s in tracker.ability_rows(kind="heal"):
@@ -1085,6 +1126,13 @@ def _report_window(ctx, settings):
                                 width=5, font=FONT, bg=PANEL, fg=INK,
                                 insertbackground=INK, relief="flat")
     heal_level_entry.pack(side="left", padx=(4, 12))
+    heal_verified_var = tk.BooleanVar(value=True)
+    tk.Checkbutton(heal_est_controls, text="Verified spells only",
+                   variable=heal_verified_var, font=FONT_SMALL,
+                   bg=BG, fg=INK, selectcolor=PANEL, activebackground=BG,
+                   activeforeground=INK,
+                   command=lambda: refresh_heal_estimates()) \
+        .pack(side="left", padx=(0, 12))
 
     heal_est_tree = ttk.Treeview(
         diag_frame, columns=("minlvl", "base", "formula", "max", "est"),
@@ -1101,11 +1149,15 @@ def _report_window(ctx, settings):
 
     tk.Label(diag_frame,
              text="Beneficial spells for the selected class with a positive "
-                  "SPA-0 (HP) effect -- candidate heals / heal-over-time "
-                  "songs, pulled straight from spells_us.txt. ESTIMATES from "
-                  "the spell's own base/formula/max data (EQEmu classic-era "
-                  "reference math, not confirmed as EQL's exact behavior); "
-                  "PER-TICK for heal-over-time effects. There's no log line "
+                  "HP effect (SPA 0/79/100) -- candidate heals / "
+                  "heal-over-time songs, pulled straight from spells_us.txt. "
+                  "ESTIMATES from the spell's own base/formula/max data "
+                  "(EQEmu classic-era reference math, not confirmed as EQL's "
+                  "exact behavior); PER-TICK for heal-over-time effects. "
+                  "'Verified spells only' keeps just the spells confirmed "
+                  "obtainable on EQL's L1-50 server (wiki-verified lists "
+                  "from the eql-info project) -- untick to see everything "
+                  "in the raw Live-inherited file. There's no log line "
                   "showing which song was active, so cross-check a guess "
                   "manually.",
              wraplength=1000, justify="left", font=FONT_SMALL, fg=SUBTLE,
@@ -1119,7 +1171,9 @@ def _report_window(ctx, settings):
             level = 50
             heal_level_var.set("50")
         cls = heal_class_var.get()
-        for info in SPELL_DB.find_class_heals(cls, max_level=level):
+        for info in SPELL_DB.find_class_heals(
+                cls, max_level=level,
+                verified_only=heal_verified_var.get()):
             hp = info.hp_effects()[0]
             est = info.estimated_hp_value(level)
             striped_insert(heal_est_tree, info.name, (
@@ -1182,13 +1236,38 @@ def _report_window(ctx, settings):
         # abilities tab
         refresh_ability_tables()
         casts_tree.delete(*casts_tree.get_children())
-        for name, count in sorted(tracker.spell_casts.items(),
-                                  key=lambda kv: -kv[1]):
+        # duration estimates scale with caster level -- use the player's
+        # real level when a /who (or level-up) line revealed it
+        est_level = tracker.player_level or 50
+        casts_hdr.config(
+            text="Spells cast (spell data from spells_us.txt; durations "
+                 f"estimated at L{est_level}"
+                 + ("" if tracker.player_level else " -- level unknown, "
+                    "refresh /who in-game to pin it") + ")")
+        # resisted-but-never-begun spells still deserve a row
+        cast_names = set(tracker.spell_casts) | set(tracker.spell_resists)
+        for name in sorted(cast_names,
+                           key=lambda n: -tracker.spell_casts.get(n, 0)):
+            count = tracker.spell_casts.get(name, 0)
             info = SPELL_DB.lookup(name)
             mana = info.mana if info else ""
             cast = f"{info.cast_time_s:.1f}s" if info else ""
-            recast = f"{info.recast_time_s}s" if info else ""
-            striped_insert(casts_tree, name, (count, mana, cast, recast))
+            recast = f"{info.recast_time_s:g}s" if info else ""
+            dur = _fmt_dur(info.duration_seconds(est_level)) if info else ""
+            resisted = tracker.spell_resists.get(name, "") or ""
+            striped_insert(casts_tree, name,
+                           (count, mana, cast, recast, dur, resisted))
+        outcomes_lbl.config(
+            text=f"Fizzles: {tracker.fizzles}   "
+                 f"Interrupts: {tracker.interrupts}   "
+                 f"Resisted by target: {sum(tracker.spell_resists.values())}   "
+                 f"Resisted by you: {tracker.resists_incoming}")
+
+        buffs_tree.delete(*buffs_tree.get_children())
+        for label, s in tracker.buff_rows():
+            shown = ("* " + label) if s["active"] else label
+            striped_insert(buffs_tree, shown,
+                           (s["gained"], s["faded"], _fmt_dur(s["uptime"])))
 
         # diagnostics tab
         calib_txt.configure(state="normal")

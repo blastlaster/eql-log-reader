@@ -1,3 +1,217 @@
+# EQL Log Reader — v1.3
+
+**Release date:** July 11, 2026
+
+Mechanics release: the suite now reads far more of the game's own spell
+data — sourced from the EQL Spell Explorer project's reverse-engineered
+client-data format (github.com/Amerzel/eql-info) and verified against the
+installed game files. Headliners: a live BUFFS block on the meter with
+level-accurate countdown estimates, buff/debuff uptime and cast-outcome
+tracking in the Session Report, wiki-verified spell filtering, proc
+tagging, and a fixed recast-time misread.
+
+## What's new in v1.3
+
+**Spell database (`eql_spell_db.py`) — much fuller read of `spells_us.txt`.**
+- Tracks the current 173-column file revision (the 2026-06-29 patch inserted
+  a placeholder column at index 103, shifting later columns; everything this
+  suite reads sits below the shift and the effects blob is located by
+  content, so both file revisions parse identically).
+- **Fixed: recovery/recast columns are milliseconds, not seconds** — a 1.5s
+  recast previously displayed as "1500s" in the Session Report.
+- Full 528-entry SPA (spell affect) name table, target-type and resist-type
+  name maps, and the 77-skill enum.
+- New per-spell fields: casting skill, endurance cost, shared reuse timer,
+  discipline flag, recourse link.
+- Song recognition now uses the game's own classification (casting skill =
+  Singing/instruments) alongside bard-exclusivity.
+- Lifetap recognition from the spell file's own target-type flag (13/20) —
+  covers all ~474 taps with no name list to maintain.
+- Buff duration estimates (EQEmu classic-era formula table, labeled as
+  estimates; EQL marks e.g. the Shielding line permanent-until-removed).
+- Heal candidates now include SPA 79 (instant HP) and SPA 100
+  (heal-over-time) effects, not just SPA 0.
+- Loads `spells_us_str.txt` to map the log's nameless buff lines ("You feel
+  armored." / "Your shielding fades.") back to the spell(s) that produce
+  them.
+- New `eql_verified_spells.py`: wiki-verified per-class spell lists (1,503
+  spells across 13 classes, from eql-info's hand-checked `verified/*.txt`).
+  Heal-candidate estimates filter to spells actually obtainable on EQL's
+  L1-50 server by default — e.g. the Bard list collapses to exactly the
+  four real regen songs — with a "Verified spells only" checkbox in the
+  Session Report's Diagnostics tab to see the raw file instead. Classes
+  with no verified data pass through unfiltered.
+
+**Combat tracker — new mechanics tracked.**
+- Buffs/debuffs on you: gained/faded counts and uptime, attributed via the
+  spell-message tables; ambiguous shared messages resolve through your
+  recent casts or gain/fade candidate pairing, and otherwise display as the
+  quoted message text rather than a guess.
+- Lifetap self-heal synthesis is now data-driven (catches every tap spell,
+  e.g. Drain Soul, not just the five hand-confirmed names).
+- Spell resists (per spell, both directions), fizzles, and interrupts —
+  classic-EQ phrasings, flagged as unconfirmed for EQL; if EQL words them
+  differently the real lines now land in the calibration tab (its keyword
+  filter also widened: resist/fizzle/interrupt/discipline/dispel).
+- Proc attribution: damage from a spell that (a) the spell file lists as
+  proc-granted (SPA 85/323/339/419/427 and friends — 3,793 candidate
+  spells) and (b) you were never seen casting shows as "Spell (proc)" in
+  the report's damage-by-ability Type column. Later cast evidence removes
+  the tag. Item-granted weapon procs aren't in client spell data and can't
+  be recognized this way — they still count normally, just untagged.
+
+**DPS/HPS Meter — live BUFFS block.** Active buffs/debuffs on you with
+estimated countdowns (soonest-to-expire first; `perm` for permanent buffs,
+`+m:ss` elapsed for unknown durations, `?` when past the estimate with no
+fade line seen). Both layouts; toggle via right-click.
+
+**Buff durations scale with your real level.** The tracker learns your
+level from `/who` entries naming your character (and the classic level-up
+line, if EQL uses it); buff and spell duration estimates scale by it
+instead of assuming L50. Confirmed against the in-game buff window:
+Shield of Barbs (duration formula 10 = 3×level+10 ticks) reads 7:18 at
+L21, where the L50 assumption said 15:00. Until a `/who` naming you
+appears in the log, estimates still assume L50 — run a plain `/who` once
+per session to pin it (the Session Report says which level its durations
+use). Buffs cast on you by OTHERS scale by the caster's level, which the
+log never reveals; those estimates stay approximate.
+
+**Session Report.** Spells-cast table gains Duration and Resisted columns
+plus a fizzles/interrupts/resists summary line; new "Buffs/debuffs on you"
+table (gained/faded/uptime, `*` = still active at the last log line). The
+Diagnostics tab's heal-candidate estimates now also consider instant-HP
+and heal-over-time effects, not just the classic HP slot.
+
+## What's included
+
+**Launcher** — control panel. Auto-detects every character in the default
+Daybreak install, pick one, then start/stop each overlay with a click.
+Friends Overlay and DPS/HPS Meter follow you automatically when you switch
+characters. Checks GitHub for newer releases.
+
+**Friends Overlay** — live friends list with level, class combo, race,
+zone, and AFK detection. Per-character rosters persist between sessions.
+Non-friend `/who` searches never pollute the roster.
+
+**DPS/HPS Meter** — retro live combat meter: DPS, HPS, DTPS with
+melee/spell/song/damage-shield splits, damage sources split six ways
+(Melee / Skill / Spell / Song / DS / Pet), pet tracked as its own actor,
+accuracy/crit/biggest-hit, kill rate, stance & invocation tracking, a
+persistent ALL TIME block, and (new) a BUFFS block showing what's on you
+with estimated countdowns. Right-click for themes, layout, fight-average
+vs rolling windows, DPS vs DPM, combat timeout, size, opacity, and the
+buff block on/off.
+
+**Session Report** — a one-page dashboard (headline stats, damage-split
+and damage-taken charts, top abilities, DPS-per-fight, Stance/Invocation
+performance) plus Abilities (full sortable damage/healing tables with
+proc tagging, spells cast with duration/resist data, buff/debuff uptime),
+Sessions (session-vs-session comparison, personal records), and
+Diagnostics (verified-filtered passive-healing estimates,
+unrecognized-line calibration) tabs.
+
+## Requirements
+
+- Windows, with EverQuest Legends running in Windowed or
+  Borderless-Windowed mode (true exclusive fullscreen draws over
+  overlays).
+- `/log on` in-game — every tool reads `eqlog_<Name>_<Server>.txt`.
+- **New in v1.3:** the spell-data features (buff names/countdowns,
+  duration/resist columns, heal estimates, proc tags) read
+  `spells_us.txt` and `spells_us_str.txt` from your EQL install. They're
+  found automatically in the default Daybreak install location (or next
+  to the log file's game directory); if the files aren't found, those
+  features quietly degrade — combat parsing itself never depends on them.
+- For level-accurate buff/spell duration estimates, run a plain `/who`
+  once per session so the log reveals your level (the Friends Overlay's
+  `/who friend all` macro does not include yourself). Until then,
+  estimates assume L50.
+
+## Themes
+
+One shared theme set across all four applets, with **16-bit Window** as
+the default: 16-bit Window, CRT Terminal, Arcade LED, Vintage (text-only
+rows), and Neon HUD — a fully transparent mode where black-outlined neon
+text floats directly over the game. Friends Overlay and DPS/HPS Meter
+offer the full set including Neon HUD; Session Report and the Launcher
+render a plain dark palette instead (they aren't floating overlays).
+
+## Distribution
+
+v1.3 ships as four standalone Windows executables (Launcher, Friends
+Overlay, DPS/HPS Meter, Session Report) sharing one runtime folder — no
+Python install required. Keep the whole installed folder together; the
+Launcher starts the others as sibling processes, and each tool keeps its
+settings/rosters/personal-records JSON files next to itself. Installing
+over an existing copy upgrades it in place; your settings and rosters are
+preserved.
+
+## Installation
+
+**Option 1: Download (recommended)**
+Download `EQL-Log-Reader-Setup.exe` from this release and run it. It
+installs the Launcher and all three overlay tools together in one folder,
+with a Start Menu entry and optional desktop icon — no Python required.
+Launch the app via the Launcher shortcut it creates.
+
+**Option 2: Build from source**
+Requires Python 3.8+ and PyInstaller (`pip install pyinstaller`), and
+Inno Setup if you want to produce a Setup.exe of your own. From the
+project folder:
+
+```
+build_exe.bat        REM builds all four tools into dist\EQL Log Reader\
+make_installer.bat   REM packages that into Output\EQL-Log-Reader-Setup.exe
+```
+
+See `BUILDING.md` for details and troubleshooting.
+
+## In-game setup (Friends Overlay)
+
+**Before anything else, turn on logging:** type `/log on` in any in-game
+chat window. Logs are written to your EverQuest Legends install's `Logs`
+folder.
+
+The Friends Overlay reads `/who` and friend-list output from the game's
+log, so it needs a dedicated chat tab plus a macro/hotkey that refreshes
+that data automatically.
+
+1. Open any chat window and create a new tab.
+2. Route all `/who` messages and "Other" messages to that tab.
+3. Turn off highlighting on new messages for that tab, so it doesn't flash/alert.
+4. Press `L` to open Socials.
+5. Create a new macro: `/friend | /who friend all | /pet who leader`.
+6. Place the macro in the last slot of your main hotbar (slot 12) — any slot works, this is just what the rest of these steps assume.
+7. Press `Alt+O` to open Settings, then go to Controls > Hotbar 1 > Button 12 (or whichever slot you used).
+8. Rebind that button to one of your movement keys (e.g. Right / D).
+9. Pressing that movement key now also fires the macro into the hidden chat tab, refreshing friend/pet data every time you move that direction.
+10. Press that direction any time you want to update the friends list. `/who` results also pop up in their own window — right-click the main overlay element and give it a try.
+
+## Notes on accuracy
+
+Log-line formats were calibrated against real gameplay logs; anything the
+parser doesn't recognize lands in the "Unrecognized lines" tab (Session
+Report) or the meter's calibration window rather than being silently
+dropped. Stance/invocation effects are sourced from eqlwiki.com. Spell
+magnitude and buff-duration estimates use classic-era EQEmu reference
+math, are labeled as estimates in the UI, and scale by your level once a
+`/who` line reveals it (Shield of Barbs' in-game 7:18 at L21 matches the
+formula exactly). Buffs cast on you by other players scale by the
+caster's level, which the log never shows — those countdowns stay
+approximate. Resist/fizzle/interrupt lines use classic-EQ phrasings not
+yet confirmed for EQL; if EQL words them differently they'll appear in
+the calibration tab instead of being counted. Spell-file mechanics
+(song/lifetap/discipline flags, target and resist types, the SPA effect
+table, buff message strings, verified spell lists) follow the
+reverse-engineered format documented by the EQL Spell Explorer project
+(github.com/Amerzel/eql-info).
+
+## License
+
+MIT — see LICENSE.
+
+---
+
 # EQL Log Reader — v1.1
 
 **Release date:** July 8, 2026

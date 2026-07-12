@@ -808,7 +808,7 @@ def run_overlay(log_path):
                 continue
             shown += 1
             y0 = y
-            outlined_text(body, x_dot, y + name_h / 2, text="\u25cf",
+            outlined_text(body, x_dot, y + name_h / 2, text="●",
                           fill=AFK_DOT if afk else
                                ONLINE_DOT if online else OFFLINE_DOT,
                           font=dot_font)

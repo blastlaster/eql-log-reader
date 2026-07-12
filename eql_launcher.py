@@ -40,10 +40,14 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import webbrowser
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from eql_overlay_common import Settings, RETRO_THEMES, DEFAULT_THEME, get_theme
+from eql_overlay_common import (Settings, RETRO_THEMES, DEFAULT_THEME,
+                                 get_theme, CURRENT_VERSION)
+from eql_update_check import check_for_update
 
 # The launcher is a normal decorated window, not a borderless overlay, so the
 # transparent (chroma-key) Neon HUD theme -- meant to float over the game --
@@ -123,6 +127,18 @@ def discover_characters():
             if existing is None or os.path.getmtime(path) > os.path.getmtime(existing["log_path"]):
                 found[cid] = entry
     return found
+
+
+def _match_discovered_character(path):
+    """If `path` is exactly one of the auto-detected characters' log files,
+    return its roster entry so Browse can mark it active too -- otherwise
+    Select and Browse would highlight the roster differently even when they
+    land on the very same character's log."""
+    target = os.path.normcase(os.path.abspath(path))
+    for entry in discover_characters().values():
+        if os.path.normcase(os.path.abspath(entry["log_path"])) == target:
+            return entry
+    return None
 
 
 def _mix(c1, c2, t):
@@ -235,6 +251,39 @@ def main():
     procs = {}                       # tool name -> Popen; survives re-themes
     ui = {"after": None}             # pending poll callback, cancelled on rebuild
 
+    # -- update check ------------------------------------------------------
+    # update_info["result"] is None until a background check finds something
+    # newer than CURRENT_VERSION, at which point it becomes
+    # {"version": "v1.2", "url": "https://github.com/.../releases/tag/v1.2"}
+    # and build_ui() (called again here) renders a small banner for it.
+    # Deliberately does nothing more automatic than that -- see
+    # eql_update_check.py for why: no download, no auto-run, nothing that
+    # looks like updater-malware behavior to antivirus.
+    update_info = {"result": None}
+
+    def check_updates_async(manual):
+        """Run the GitHub check off-thread (it's a blocking network call),
+        then hop back onto the Tk main thread via root.after to touch any
+        widgets. `manual` controls whether a result is reported either way
+        (button click) or only when something's actually found (silent
+        startup check -- most runs it'll find nothing, and that shouldn't
+        pop a dialog)."""
+        def worker():
+            result = check_for_update(CURRENT_VERSION)
+
+            def apply():
+                if result:
+                    version, url = result
+                    update_info["result"] = {"version": version, "url": url}
+                    build_ui()
+                elif manual:
+                    messagebox.showinfo(
+                        "Up to date",
+                        f"You're running the latest version (v{CURRENT_VERSION}).")
+            root.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def build_ui():
         """(Re)build the whole launcher UI in the current theme. Called once
         at startup and again whenever a new theme is picked -- widgets bake
@@ -287,6 +336,36 @@ def main():
         theme_btn.configure(menu=theme_menu)
         theme_btn.pack(side="right")
 
+        check_updates_btn = button(header, text="Check for Updates", font=(FAM, 8))
+        check_updates_btn.config(command=lambda: check_updates_async(manual=True))
+        check_updates_btn.pack(side="right", padx=(0, 6))
+
+        # -- update banner (only shown once a background/manual check has
+        # actually found something newer than CURRENT_VERSION) -----------------
+        if update_info["result"]:
+            info = update_info["result"]
+
+            def copy_update_link():
+                root.clipboard_clear()
+                root.clipboard_append(info["url"])
+                root.update()  # push the clipboard write through immediately
+                messagebox.showinfo("Link copied",
+                                     "Download link copied to clipboard.")
+
+            def open_update_link():
+                webbrowser.open(info["url"])
+
+            upd = tk.Frame(root, bg=ACCENT, padx=10, pady=6)
+            upd.pack(fill="x")
+            tk.Label(upd, text=f"⬆ {info['version']} available",
+                     font=(FAM, 9, "bold"), bg=ACCENT, fg=BG).pack(side="left")
+            tk.Button(upd, text="Copy Link", font=(FAM, 8), bg=BG, fg=ACCENT,
+                      relief="flat", command=copy_update_link
+                      ).pack(side="right", padx=(4, 0))
+            tk.Button(upd, text="Open in Browser", font=(FAM, 8), bg=BG, fg=ACCENT,
+                      relief="flat", command=open_update_link
+                      ).pack(side="right")
+
         # -- active character / log file summary --------------------------------
         log_frame = tk.Frame(root, bg=PANEL, padx=10, pady=8)
         log_frame.pack(fill="x", padx=10, pady=(0, 6))
@@ -325,8 +404,17 @@ def main():
                            ("Text files", "*.txt"), ("All files", "*.*")])
             if chosen and os.path.isfile(chosen):
                 settings["log_path"] = chosen
-                settings["active_character_id"] = ""
-                settings["inventory_path"] = ""
+                # If the browsed file matches one of the auto-detected
+                # characters, mark it active too -- so Browse highlights the
+                # roster the same way Select does, instead of only updating
+                # the summary line above and leaving the picker unhighlighted.
+                matched = _match_discovered_character(chosen)
+                if matched:
+                    settings["active_character_id"] = matched["id"]
+                    settings["inventory_path"] = matched.get("inventory_path") or ""
+                else:
+                    settings["active_character_id"] = ""
+                    settings["inventory_path"] = ""
                 settings.save()
                 refresh_path_label()
                 rebuild_roster()
@@ -480,6 +568,7 @@ def main():
         poll_status()
 
     build_ui()
+    check_updates_async(manual=False)   # quiet startup check; no dialog if nothing's newer
     root.mainloop()
 
 

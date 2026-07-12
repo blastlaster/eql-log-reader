@@ -119,6 +119,7 @@ from eql_overlay_common import (
     POLL_INTERVAL_MS, luma as _luma,
 )
 from eql_combat_tracker import CombatTracker, YOU_LABEL, PET_LABEL
+from eql_spell_db import SPELL_DB
 
 RENDER_INTERVAL_MS = 90      # animation frame rate (independent of log polling)
 BAR_EASE = 0.30              # how quickly the readout numbers ease toward target
@@ -284,6 +285,50 @@ def _fmt_num(n):
     return str(n)
 
 
+def _fmt_countdown(secs):
+    secs = int(secs)
+    if secs >= 3600:
+        return f"{secs // 3600}h{(secs % 3600) // 60:02d}"
+    if secs >= 60:
+        return f"{secs // 60}:{secs % 60:02d}"
+    return f"{secs}s"
+
+
+def _buff_display_rows(tracker, max_rows=6):
+    """(label, time-text) for the buffs/debuffs currently active on YOU
+    (tracked from the spell file's cast-on-you/fade messages), soonest to
+    expire first. The countdown is an ESTIMATE from the spell's own
+    duration formula (see eql_spell_db.duration_seconds caveats), scaled
+    by YOUR level when the log has revealed it (/who or a level-up line;
+    L50 assumed until then). Buffs someone ELSE cast on you scale by the
+    CASTER's level, which the log never shows -- those estimates read
+    long/short by the level difference:
+      3:42  -- estimated time left
+      ?     -- past its estimated end but no fade message seen yet
+      perm  -- permanent until removed
+      +1:07 -- unknown duration (ambiguous message / not in the spell
+               file); shows time since it landed instead"""
+    now = time.time()
+    lvl = tracker.player_level or 50
+    rows = []
+    for label, start in tracker.active_buffs.items():
+        info = SPELL_DB.lookup(label)
+        dur = info.duration_seconds(lvl) if info else 0
+        if dur and dur > 0:
+            rem = dur - (now - start)
+            if rem <= 0:
+                rows.append((float("inf"), label, "?"))
+            else:
+                rows.append((rem, label, _fmt_countdown(rem)))
+        elif dur == -1:
+            rows.append((float("inf"), label, "perm"))
+        else:
+            rows.append((float("inf"), label,
+                         "+" + _fmt_countdown(now - start)))
+    rows.sort(key=lambda r: (r[0], r[1]))
+    return [(lbl, txt) for _, lbl, txt in rows[:max_rows]]
+
+
 def _contrast_on(color, th):
     """A text color readable ON a bar filled with `color`: something dark
     over bright bars, the theme's (bright) fg over dark bars. Transparent
@@ -322,6 +367,8 @@ def run_overlay(log_path):
         # DMG SOURCES rows: False = percent only, True = also draw the
         # actual damage dealt on the graph (% keeps its usual spot)
         "seg_show_amount": False,
+        # BUFFS block: active buffs/debuffs on you with estimated countdowns
+        "show_buffs": True,
         "scale": 1.0,   # element size; fonts stay constant (see SIZE_STEPS)
     })
 
@@ -388,6 +435,9 @@ def run_overlay(log_path):
         prev_store = live.get("alltime")
         if prev_store:
             prev_store.save()   # switching characters -- flush the old file
+        # the tracker's song-vs-spell fallback needs spells_us.txt; the log
+        # lives in <game dir>\Logs, so the game dir is two levels up
+        SPELL_DB.set_game_dir_hint(os.path.dirname(os.path.dirname(path)))
         tracker = CombatTracker(
             self_name=char_name_from(path),
             idle_timeout=float(settings.get("idle_timeout", 45)))
@@ -627,10 +677,13 @@ def run_overlay(log_path):
         if at:   # header + stats + kills, then stance/invoc lines if any
             at_lines = 3 + (1 if at.time_pcts("stance_secs") else 0) \
                          + (1 if at.time_pcts("invocation_secs") else 0)
+        buff_rows = _buff_display_rows(tracker) \
+            if settings.get("show_buffs", True) else []
         h = (gap + 3 * row_big + 2 * row_sub
              + (2 * row_pet if has_pet else 0) + gap + gap
-             + len(SEGMENTS) * row_seg + 4 + gap
-             + (3 + at_lines) * row_ft + 4)
+             + len(SEGMENTS) * row_seg + 4
+             + ((2 * gap + len(buff_rows) * row_ft + 4) if buff_rows else 0)
+             + gap + (3 + at_lines) * row_ft + 4)
         canvas.configure(width=w, height=h)
         draw_background(w, h)
 
@@ -706,6 +759,25 @@ def run_overlay(log_path):
             y += row_seg
         y += 4
 
+        # -- active buffs/debuffs on you, est. countdowns (see
+        #    _buff_display_rows for the time-text legend) --------------------
+        if buff_rows:
+            canvas.create_line(8, y, w - 8, y, fill=th["dim"])
+            y += gap
+            draw_text(w // 2, y, text="— BUFFS —",
+                      fill=th["accent"], font=mono(9, "bold"))
+            y += gap
+            maxch = max(10, (w - 70) // 6)
+            for label, txt in buff_rows:
+                name = label if len(label) <= maxch \
+                    else label[:maxch - 1] + "…"
+                draw_text(8, y, anchor="w", text=name, fill=th["fg"],
+                          font=mono(8))
+                draw_text(w - 8, y, anchor="e", text=txt, fill=th["dim"],
+                          font=mono(8))
+                y += row_ft
+            y += 4
+
         canvas.create_line(8, y, w - 8, y, fill=th["dim"])
         y += gap
         # -- bottom section: everything centered, dim data under accent
@@ -763,7 +835,9 @@ def run_overlay(log_path):
         # texts tighten instead of shrinking so fonts stay the same.
         s = settings.get("scale", 1.0)
         w = max(380, int(CANVAS_WIDTH_H * s))
-        h = CANVAS_HEIGHT_H
+        buff_rows = _buff_display_rows(tracker) \
+            if settings.get("show_buffs", True) else []
+        h = CANVAS_HEIGHT_H + (14 if buff_rows else 0)
         canvas.configure(width=w, height=h)
         draw_background(w, h)
 
@@ -871,6 +945,18 @@ def run_overlay(log_path):
                                anchor="nw", text=alltxt,
                                fill=th["dim"], font=mono(8))
 
+        # Row 5: active buffs/debuffs on you, est. countdowns (see
+        # _buff_display_rows for the time-text legend)
+        if buff_rows:
+            bhdr = "BUFFS"
+            draw_text(10, 128, anchor="nw", text=bhdr,
+                      fill=th["accent"], font=mono(8, "bold"))
+            btxt = "  ".join(
+                (lbl if len(lbl) <= 16 else lbl[:15] + "…") + f" {txt}"
+                for lbl, txt in buff_rows)
+            draw_text(14 + mono(8, "bold").measure(bhdr), 128,
+                      anchor="nw", text=btxt, fill=th["dim"], font=mono(8))
+
     prev_state = {"live": False}
 
     def render():
@@ -944,6 +1030,10 @@ def run_overlay(log_path):
 
     def set_seg_amount(v):
         settings["seg_show_amount"] = v
+        settings.save()
+
+    def set_show_buffs(v):
+        settings["show_buffs"] = v
         settings.save()
 
     def quit_app():
@@ -1070,6 +1160,10 @@ def run_overlay(log_path):
         m.add_cascade(label="Opacity", menu=op)
 
         m.add_separator()
+        cur_b = settings.get("show_buffs", True)
+        m.add_command(
+            label=("● " if cur_b else "   ") + "Show active buffs",
+            command=lambda: set_show_buffs(not cur_b))
         m.add_command(label="Reset current fight", command=reset_fight)
         _report_sibling = "eql_session_report.exe" if getattr(sys, "frozen", False) \
             else "eql_session_report.py"

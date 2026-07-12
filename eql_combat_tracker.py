@@ -111,25 +111,26 @@ The known stance/invocation *effects* (hardcoded in STANCES/INVOCATIONS)
 come from eqlwiki.com, since that's a small, fixed, documented set
 regardless of log wording.
 
-Why spell damage/mana numbers aren't pulled from spells_us.txt
------------------------------------------------------------------
-spells_us.txt (confirmed present, classic pipe-delimited EQ spell database,
-173 fields/row) does exist in this install and is genuinely readable --
-eql_spell_db.py parses it for name/mana/cast-time/recast-time lookups where
-the field layout could be validated with confidence. But this 173-field
-revision doesn't line up cleanly with the field-by-field schema EQEmu
-documents for modern spells_new (that schema has 200+ fields, several of
-them added over years of live patches this file predates), and getting an
-effect *magnitude* field wrong would silently produce confidently-wrong
-numbers -- worse than not having them. Actual damage/heal amounts here
-come from the log instead, which is ground truth (it already reflects
-resists, crits, and level scaling that a static formula field wouldn't).
+How spells_us.txt is (and isn't) used here
+---------------------------------------------
+The spell file's full 173-column layout is now documented (see
+eql_spell_db.py, which follows github.com/Amerzel/eql-info's reverse-
+engineered SPELL_FORMAT.md), so this tracker leans on it for
+CLASSIFICATION: song-vs-spell (casting skill), lifetap recognition
+(target_type flag), and buff/debuff message attribution (spells_us_str.txt
+maps each spell to the "cast on you" / "fades" strings the client logs,
+which carry no spell name of their own). Actual damage/heal AMOUNTS still
+always come from the log, which is ground truth -- it already reflects
+resists, crits, and level scaling that static spell data plus estimate
+formulas can only approximate.
 """
 
 import re
 import time
 from collections import deque
 from datetime import datetime
+
+from eql_spell_db import SPELL_DB
 
 TS_RE = r"\[(?P<ts>[A-Za-z]{3} [A-Za-z]{3} \d{2} \d{2}:\d{2}:\d{2} \d{4})\] "
 TS_ONLY_RE = re.compile(TS_RE)
@@ -240,6 +241,14 @@ SELF_HIT_RE = re.compile(
 # repeatedly. _maybe_record_lifetap_heal() synthesizes the missing self-heal
 # 1:1 with the damage actually logged, so these spells show up as healing
 # instead of silently vanishing.
+#
+# Recognition is primarily DATA-DRIVEN: the spell file flags the mechanic
+# itself (target_type 13 = Lifetap / 20 = targeted-AE lifetap, per
+# github.com/Amerzel/eql-info's SPELL_FORMAT.md), so SPELL_DB.lifetap_names()
+# covers every tap in the game -- necro/SK spell lines, bard's Ancient
+# Warsong twist, item procs -- with no list to maintain. The hand-checked
+# names below are kept only as a fallback for when spells_us.txt isn't
+# found (they're the ones confirmed against real logs).
 LIFETAP_SPELLS = {"lifetap", "lifespike", "lifedraw", "siphon life",
                   "spirit tap"}
 
@@ -292,8 +301,26 @@ NONMELEE_FALLBACK_RE = re.compile(
 #    non-damage spell casts (buffs/utility), and to learn whether an ability
 #    is a spell or a Bard song ("casting" vs "singing") so its damage lands
 #    in the right category later (DoT ticks name only the ability) ----------
+#    The spell group is deliberately permissive (.+?): checked against every
+#    name in the game's own spells_us.txt, ~30% contain characters beyond
+#    letters/apostrophe/space (digits, colons, hyphens, parens -- "Illusion:
+#    Werewolf", "Yaulp III"...), which the old [A-Za-z' ] class rejected.
 CASTING_RE = re.compile(
-    TS_RE + r"(?P<who>You|[A-Za-z]+) begin(?:s)? (?P<how>casting|singing) (?P<spell>[A-Za-z' ]+?)\.?\s*$")
+    TS_RE + r"(?P<who>You|[A-Za-z]+) begin(?:s)? (?P<how>casting|singing) (?P<spell>.+?)\.?\s*$")
+
+# -- cast outcomes: resists / fizzles / interrupts ---------------------------
+#    Classic-EQ phrasings, NOT yet confirmed against an EQL log (same caveat
+#    tier as the other *_FALLBACK_RE patterns). If EQL words these
+#    differently, the real lines will land in `unmatched` via the widened
+#    calibration keyword filter below -- promote them here once seen.
+RESIST_OUT_RE = re.compile(       # a mob shrugging off YOUR spell
+    TS_RE + r"Your target resisted the (?P<spell>.+?) spell\.?\s*$")
+RESIST_IN_RE = re.compile(        # you shrugging off a mob's spell
+    TS_RE + r"You resist the (?P<spell>.+?) spell!?\s*$")
+FIZZLE_RE = re.compile(
+    TS_RE + r"(?:Your spell fizzles!?|You miss a note, bringing your song to a close!?)\s*$")
+INTERRUPT_RE = re.compile(
+    TS_RE + r"(?:Your spell is interrupted\.?|Your casting has been interrupted!?)\s*$")
 
 # -- third-party combat (confirmed logged in EQL: group members, their pets,
 #    and mobs fighting each other all appear in full). Only lines involving
@@ -329,6 +356,23 @@ REGEN_RE = re.compile(TS_RE + r"Your wounds begin to heal\.?\s*$")
 #    style pets ("<Charname>`s warder") are recognized by pattern alone.
 PET_LEADER_RE = re.compile(
     TS_RE + r"(?P<pet>[A-Za-z]+) says, 'My leader is (?P<owner>[A-Za-z]+)\.'\s*$")
+
+# -- /who entries -- confirmed EQL format (same one the Friends Overlay
+#    parses): "[21 DRU] Miranda (Wood Elf)  ZONE: ...". When the name is
+#    this character, it reveals the player's LEVEL, which buff-duration
+#    estimates scale by (e.g. Shield of Barbs, duration formula 10 =
+#    3*level+10 ticks: 7:18 at L21 vs 15:00 at L50 -- confirmed against
+#    the in-game buff window). All who entries are consumed either way so
+#    they can never be misread as combat.
+WHO_ENTRY_RE = re.compile(
+    TS_RE + r"\s*\[(?P<level>\d+) (?P<classes>[A-Z]{1,4}(?:/[A-Z]{1,4})*)\]"
+            r" (?P<name>[A-Za-z]+) \(")
+
+# -- level up -- classic-EQ phrasing, NOT yet confirmed for EQL (same
+#    caveat tier as the *_FALLBACK_RE patterns); a /who refresh will catch
+#    the level anyway even if this never matches.
+GAIN_LEVEL_RE = re.compile(
+    TS_RE + r"You have gained a level! Welcome to level (?P<level>\d+)!\s*$")
 
 # -- chat lines -- players quoting combat words ("the damage shields
 #    really rip") were landing in the calibration list. Any tell/say/
@@ -442,7 +486,12 @@ def _blank_actor():
 
 
 def _blank_ability():
-    return {"total": 0, "hits": 0, "crits": 0, "biggest": 0, "category": "melee"}
+    # "proc": True when this looks like an automatic trigger rather than a
+    # cast -- the spell file lists it as proc-granted (SPELL_DB.proc_names)
+    # AND you were never seen casting it. Re-evaluated on every hit, so
+    # later cast evidence flips it off (log evidence wins over static data).
+    return {"total": 0, "hits": 0, "crits": 0, "biggest": 0,
+            "category": "melee", "proc": False}
 
 
 class Fight:
@@ -504,12 +553,21 @@ class CombatTracker:
         self.unknown_verbs = {}      # verb -> count
         # ability -> "song"|"spell", learned from "You begin singing/casting
         # X" lines, so DoT ticks (which only name the ability) categorize
-        # correctly. Unknown abilities default to "spell".
+        # correctly. Abilities never announced that way (melody auto-play
+        # logs no song name) are resolved via the spell DB in
+        # _spell_category; anything still unknown defaults to "spell".
         self.ability_kind = {}
 
         # everything the meter/report shows is SESSION-scoped and resets on
         # the "Welcome to EverQuest Legends!" login banner
         self._reset_session_state(None)
+
+        # The player's level, learned from /who self-entries (and, if EQL
+        # uses the classic phrasing, level-up lines). Persists across
+        # session resets like pet names -- relogging doesn't change your
+        # level. None until first seen; buff-duration estimates fall back
+        # to L50 then.
+        self.player_level = None
 
         # Your pet(s): "<Charname>`s warder"-style names match by pattern
         # alone; named pets (necro/mage style, e.g. "Jenann") are learned
@@ -533,6 +591,7 @@ class CombatTracker:
         self._pending_crit_source = None
         self._pending_casts = {}     # name -> (spell, expires_wall)
         self._last_activity_wall = 0.0
+        self._last_line_wall = wall_time or 0.0   # newest log timestamp seen
         self.session_start_wall = wall_time
 
         # session totals ------------------------------------------------------
@@ -573,6 +632,22 @@ class CombatTracker:
         self.abilities_dmg = {}      # ability name -> _blank_ability()
         self.abilities_heal = {}     # ability name -> _blank_ability()
         self.spell_casts = {}        # spell name -> cast count
+        # cast outcomes (classic-format lines; see RESIST_OUT_RE etc.)
+        self.spell_resists = {}      # spell name -> times a mob resisted it
+        self.resists_incoming = 0    # spells YOU shrugged off
+        self.fizzles = 0
+        self.interrupts = 0
+        # buffs/debuffs on YOU, recognized by exact match against the
+        # spell file's own "cast on you" / "fades" messages (see
+        # SpellDB.buff_landed_candidates). Labels are a spell name when the
+        # message is unambiguous (or a recent cast resolves it), otherwise
+        # the raw message text in quotes -- honest about ambiguity.
+        self.active_buffs = {}       # label -> wall time it landed
+        self._active_buff_cands = {}  # label -> set of candidate spell names
+        self.buff_gains = {}         # label -> times gained this session
+        self.buff_fades = {}         # label -> times faded this session
+        self.buff_uptime = {}        # label -> completed-stretch seconds
+        self.buff_events = deque(maxlen=500)   # (wall, label, "gained"|"faded")
 
         self.stance = None           # unknown until re-asserted this session
         self.invocation = None
@@ -635,9 +710,19 @@ class CombatTracker:
                     r"(?P<target>" + pet + r")" + tail, re.IGNORECASE)
 
     def _spell_category(self, ability):
-        """"song" if we saw the ability started with "begin singing",
-        else "spell"."""
-        return self.ability_kind.get(ability, "spell")
+        """"song" if we saw the ability started with "begin singing", else
+        "spell". When the log never named the kind -- twisting via melody
+        auto-play logs only "You whistle an ancient warsong.", with no song
+        name, so a meter started mid-session has no "begin singing" line to
+        learn from -- fall back to the game's own spell data: an ability
+        only a Bard can use is a song. A later "begin singing/casting" line
+        still overrides this (log evidence wins over static data)."""
+        kind = self.ability_kind.get(ability)
+        if kind is None:
+            kind = "song" if ability.strip().lower() \
+                in SPELL_DB.bard_song_names() else "spell"
+            self.ability_kind[ability] = kind
+        return kind
 
     # -- fight lifecycle -------------------------------------------------------
     def _ensure_fight(self, wall_time):
@@ -772,6 +857,9 @@ class CombatTracker:
             ab["category"] = category
             if crit:
                 ab["crits"] += 1
+            if ability and category == "spell":
+                ab["proc"] = ability not in self.spell_casts \
+                    and ability.lower() in SPELL_DB.proc_names()
         elif src_label == PET_LABEL:
             self._push_recent("pet_out", wall_time, amount, category)
             self.pet_dmg_out += amount
@@ -834,10 +922,108 @@ class CombatTracker:
     def _maybe_record_lifetap_heal(self, wall_time, ability, amount):
         """See LIFETAP_SPELLS: your own casts of these log the damage half
         but never the heal half, unlike everyone else's. Synthesize the
-        missing self-heal 1:1 with the damage that WAS logged."""
-        if ability and ability.lower() in LIFETAP_SPELLS:
+        missing self-heal 1:1 with the damage that WAS logged. Taps are
+        recognized from the spell file's own target_type flag (with the
+        hand-confirmed name set as fallback when no spell file is found)."""
+        if not ability:
+            return
+        name = ability.lower()
+        if name in SPELL_DB.lifetap_names() or name in LIFETAP_SPELLS:
             self._record_heal(wall_time, YOU_LABEL, YOU_LABEL, amount,
                               ability=ability)
+
+    # -- buff/debuff messages on YOU ---------------------------------------------
+    # A buff landing on you ("You feel armored.") or wearing off ("Your
+    # armor fades.") logs only the spell's message text -- no spell name,
+    # no caster. spells_us_str.txt maps those messages back to spells (see
+    # SpellDB), which is the only way to track buff coverage from the log.
+
+    # Buff cast times routinely exceed CAST_WINDOW (which is tuned for
+    # damage attribution), so "You begin casting X" stays usable for
+    # naming an ambiguous landed-message for this much longer.
+    BUFF_CAST_SLACK = 8.0
+
+    def _resolve_buff_label(self, candidates, wall_time, fading):
+        """Pick a display label for a buff message that maps to one or more
+        spells. Unambiguous -> the spell name. Ambiguous -> a recent cast
+        of ours that's among the candidates, else a candidate already
+        tracked as active (recast/fade of the same thing), else None (the
+        caller falls back to quoting the message text -- honest, never a
+        guess)."""
+        if len(candidates) == 1:
+            return candidates[0]
+        pending = self._pending_casts.get(YOU_LABEL)
+        if not fading and pending \
+           and pending[1] + self.BUFF_CAST_SLACK >= wall_time \
+           and pending[0] in candidates:
+            return pending[0]
+        active = [c for c in candidates if c in self.active_buffs]
+        if len(active) == 1:
+            return active[0]
+        return None
+
+    def _close_buff(self, label, wall_time):
+        start = self.active_buffs.pop(label, None)
+        self._active_buff_cands.pop(label, None)
+        if start is not None:
+            self.buff_uptime[label] = \
+                self.buff_uptime.get(label, 0.0) + max(wall_time - start, 0.0)
+
+    def _handle_buff_message(self, wall_time, body):
+        """Try `body` (line text after the timestamp, tags stripped)
+        against the spell file's cast-on-you / fade message tables.
+        Returns True if the line was recognized as a buff event."""
+        candidates = SPELL_DB.buff_landed_candidates(body)
+        if candidates:
+            label = self._resolve_buff_label(candidates, wall_time, False) \
+                or f'"{body.strip()}"'
+            if label in self.active_buffs:  # recast before it faded --
+                self._close_buff(label, wall_time)  # bank the stretch
+            self.active_buffs[label] = wall_time
+            self._active_buff_cands[label] = set(candidates)
+            self.buff_gains[label] = self.buff_gains.get(label, 0) + 1
+            self.buff_events.append((wall_time, label, "gained"))
+            self._notify()
+            return True
+        candidates = SPELL_DB.buff_faded_candidates(body)
+        if candidates:
+            label = self._resolve_buff_label(candidates, wall_time, True)
+            if label is None:
+                # No direct name match -- pair through candidate overlap:
+                # a fade message and its landed message name the same
+                # spell(s), so an active (possibly quoted-message) label
+                # whose candidate set intersects ours is the same buff.
+                cand_set = set(candidates)
+                overlap = [lbl for lbl, cs in self._active_buff_cands.items()
+                           if cs & cand_set]
+                label = overlap[0] if len(overlap) == 1 \
+                    else f'"{body.strip()}"'
+            self._close_buff(label, wall_time)
+            self.buff_fades[label] = self.buff_fades.get(label, 0) + 1
+            self.buff_events.append((wall_time, label, "faded"))
+            self._notify()
+            return True
+        return False
+
+    def buff_rows(self, now=None):
+        """Sorted (label, stats) pairs for every buff/debuff message seen
+        on you this session: gained/faded counts and total uptime seconds
+        (still-active buffs count up to `now`, defaulting to the newest
+        log timestamp seen -- NOT wall-clock, so replaying an old log
+        doesn't inflate active buffs). Sorted by uptime, longest first."""
+        now = now if now is not None else \
+            (self._last_line_wall or time.time())
+        rows = {}
+        for label in set(self.buff_gains) | set(self.buff_fades):
+            up = self.buff_uptime.get(label, 0.0)
+            start = self.active_buffs.get(label)
+            if start is not None:
+                up += max(now - start, 0.0)
+            rows[label] = {"gained": self.buff_gains.get(label, 0),
+                           "faded": self.buff_fades.get(label, 0),
+                           "uptime": up,
+                           "active": start is not None}
+        return sorted(rows.items(), key=lambda kv: -kv[1]["uptime"])
 
     def _notify(self):
         if self.on_change:
@@ -885,6 +1071,7 @@ class CombatTracker:
                 pass
         if self.session_start_wall is None:
             self.session_start_wall = wall_time
+        self._last_line_wall = max(self._last_line_wall, wall_time)
 
         # session boundary: login banner -> wipe ALL session-scoped state
         if SESSION_START_RE.match(line):
@@ -897,6 +1084,21 @@ class CombatTracker:
             if self.self_name and \
                m.group("owner").lower() == self.self_name.lower():
                 self._register_pet(m.group("pet"))
+            return
+
+        # /who entries: learn the player's own level; consume all of them
+        m = WHO_ENTRY_RE.match(line)
+        if m:
+            if self.self_name and \
+               m.group("name").lower() == self.self_name.lower():
+                self.player_level = int(m.group("level"))
+                self._notify()
+            return
+
+        m = GAIN_LEVEL_RE.match(line)
+        if m:
+            self.player_level = int(m.group("level"))
+            self._notify()
             return
 
         # chat (tell/say/shout/auction) -- never combat; must come after
@@ -943,6 +1145,27 @@ class CombatTracker:
             self._pending_casts[who] = (spell, wall_time + CAST_WINDOW)
             if who == YOU_LABEL:
                 self.spell_casts[spell] = self.spell_casts.get(spell, 0) + 1
+            return
+
+        # cast outcomes: resists / fizzles / interrupts (classic phrasings,
+        # unconfirmed for EQL -- see the regex block for the caveat)
+        m = RESIST_OUT_RE.match(line)
+        if m:
+            spell = m.group("spell")
+            self.spell_resists[spell] = self.spell_resists.get(spell, 0) + 1
+            self._notify()
+            return
+        if RESIST_IN_RE.match(line):
+            self.resists_incoming += 1
+            self._notify()
+            return
+        if FIZZLE_RE.match(line):
+            self.fizzles += 1
+            self._notify()
+            return
+        if INTERRUPT_RE.match(line):
+            self.interrupts += 1
+            self._notify()
             return
 
         m = SELF_HIT_RE.match(line)
@@ -1166,9 +1389,18 @@ class CombatTracker:
             self._notify()
             return
 
+        # buff/debuff landed-on-you & fade messages -- exact match against
+        # the spell file's own message strings, checked only after every
+        # combat pattern has had its chance (cheap dict lookups)
+        m_body = TS_ONLY_RE.match(line)
+        if m_body and self._handle_buff_message(wall_time, line[m_body.end():]):
+            return
+
         # nothing matched -- keep combat-flavored lines around for calibration
         if re.search(r"\bdamage\b|\bheal(?:s|ed)?\b|\bslain\b|\bcritical\b"
-                     r"|\bstance\b|\binvocation\b", line, re.IGNORECASE) \
+                     r"|\bstance\b|\binvocation\b|\bresist(?:s|ed)?\b"
+                     r"|\bfizzle|\binterrupt|\bdiscipline\b|\bdispel",
+                     line, re.IGNORECASE) \
            and TS_RE and re.match(TS_RE, line):
             self.unmatched.append(line)
 

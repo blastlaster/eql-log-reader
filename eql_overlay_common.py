@@ -20,6 +20,12 @@ import os
 POLL_INTERVAL_MS = 250      # how often overlays should re-check the log
 SEED_BYTES = 512 * 1024     # how much of the log tail to parse on startup
 
+# Suite-wide version stamp, used by the Launcher's update check
+# (eql_update_check.py) to decide whether a newer GitHub release exists.
+# Bump this alongside installer.iss's MyAppVersion on every release, or the
+# update check will keep comparing against a stale number.
+CURRENT_VERSION = "1.3"
+
 
 # ----------------------------------------------------------------------------
 # Log tailing
