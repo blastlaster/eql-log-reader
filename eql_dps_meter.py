@@ -31,22 +31,27 @@ Right-click the overlay for:
                    / Rolling 10s / Rolling 30s (what's hitting right now --
                    better reflects bursts, e.g. a big hit no longer gets
                    averaged away by a long fight)
-  * Rate units  -- Per second (DPS/HPS/DTPS) / Per minute (DPM/HPM/DTPM).
-                   Same numbers x60; per-minute reads better at low levels
-                   where per-second rates are single digits.
+  * Rate units  -- Per second (DPS/HPS/DTPS) / Per minute (DPM/HPM/DTPM) /
+                   Per hour (DPH/HPH/DTPH). Same numbers x60 / x3600;
+                   per-minute reads better at low levels where per-second
+                   rates are single digits, per-hour suits whole-grind
+                   sustained output. Each unit mode remembers its OWN
+                   Combat timeout (see below) and swaps it in on switch.
   * DMG sources -- Percent only (default) / Damage + percent: adds the
                    actual damage dealt per source onto the DMG SOURCES
                    graph (at the end of each bar in the vertical layout,
                    in place of the rate in the horizontal one); the % keeps
                    its usual spot either way.
-  * Combat timeout -- 5s / 15s / 30s / 45s / 60s without damage before the
-                   current Combat ends. Short = fights split cleanly per
-                   mob (bleed-over stops) but chained pulls fragment; long
-                   = chained pulls stay one fight but downtime bleeds
-                   between them. Applies immediately -- switch mid-session
-                   to feel out the right value. (DPS itself is safe either
-                   way: rates divide by ACTIVE combat time, so the timeout
-                   mostly changes how fights are GROUPED, not the number.)
+  * Combat timeout -- how long without damage before the current Combat
+                   ends. The preset list follows the unit mode, and each
+                   mode remembers its own pick: per-second 5s-60s (split
+                   fights cleanly per mob vs. keep chained pulls together),
+                   per-minute 1m/5m/15m/30m/45m/60m (chain whole pulls),
+                   per-hour 1h-5h (a grind session is one Combat). Applies
+                   immediately -- switch mid-session to feel out the right
+                   value. (The rate itself is safe either way: rates divide
+                   by ACTIVE combat time, so the timeout mostly changes how
+                   fights are GROUPED, not the number.)
 
 All-time visualizer
 ---------------------
@@ -383,10 +388,15 @@ def run_overlay(log_path):
         # pulls is capped out of the denominator -- see eql_combat_tracker's
         # ACTIVE_GAP_CAP); "rolling10"/"rolling30" = what's hitting right now
         "rate_mode": "fight",
-        "units": "sec",   # "sec" (DPS/HPS/DTPS) or "min" (DPM/HPM/DTPM)
-        # seconds without damage dealt/received before the Combat ends --
-        # selectable (5-60s) so fight grouping can be tuned by feel
+        # "sec" (DPS/HPS/DTPS), "min" (DPM/HPM/DTPM), "hour" (DPH/HPH/DTPH)
+        "units": "sec",
+        # seconds without damage dealt/received before the Combat ends.
+        # Each unit mode keeps its OWN timeout (switching units swaps it in):
+        # per-second tunes fight grouping by feel (5-60s); per-minute chains
+        # pulls (1m-60m); per-hour groups whole grind sessions (1h-5h).
         "idle_timeout": 45,
+        "idle_timeout_min": 60,
+        "idle_timeout_hour": 3600,
         # DMG SOURCES rows: False = percent only, True = also draw the
         # actual damage dealt on the graph (% keeps its usual spot)
         "seg_show_amount": False,
@@ -401,17 +411,46 @@ def run_overlay(log_path):
                   ("rolling10", "Rolling 10s"),
                   ("rolling30", "Rolling 30s"))
     RATE_BADGE = {"fight": "avg", "rolling10": "10s", "rolling30": "30s"}
-    UNIT_MODES = (("sec", "Per second (DPS)"), ("min", "Per minute (DPM)"))
-    TIMEOUT_CHOICES = (5, 15, 30, 45, 60)
+    UNIT_MODES = (("sec", "Per second (DPS)"), ("min", "Per minute (DPM)"),
+                  ("hour", "Per hour (DPH)"))
+    # Combat-timeout presets PER unit mode: per-second tunes fight grouping
+    # by feel; per-minute chains pulls; per-hour makes a grind session one
+    # Combat. Each mode remembers its own choice (TIMEOUT_KEYS).
+    TIMEOUT_CHOICES = {"sec": (5, 15, 30, 45, 60),
+                       "min": (60, 300, 900, 1800, 2700, 3600),
+                       "hour": (3600, 7200, 10800, 14400, 18000)}
+    TIMEOUT_KEYS = {"sec": "idle_timeout", "min": "idle_timeout_min",
+                    "hour": "idle_timeout_hour"}
+    TIMEOUT_DEFAULTS = {"sec": 45, "min": 60, "hour": 3600}
 
-    def per_min():
-        return settings.get("units", "sec") == "min"
+    def unit_mode():
+        u = settings.get("units", "sec")
+        return u if u in ("sec", "min", "hour") else "sec"
+
+    def unit_factor():
+        """Multiplier from per-second rates to the displayed unit."""
+        return {"sec": 1.0, "min": 60.0, "hour": 3600.0}[unit_mode()]
+
+    def active_timeout():
+        """The Combat idle timeout for the ACTIVE unit mode (seconds)."""
+        mode = unit_mode()
+        return float(settings.get(TIMEOUT_KEYS[mode], TIMEOUT_DEFAULTS[mode]))
+
+    def fmt_rate(v):
+        """A rate readout: raw for per-second/minute (unchanged behavior),
+        abbreviated in per-hour mode where values run 5-7 digits (108.0K)."""
+        return _fmt_num(v) if unit_mode() == "hour" and v >= 1000 \
+            else f"{v:.0f}"
 
     def unit_labels():
         """(DPS, HPS, DTPS, PET-DPS, PET-DTPS, /s) labels for the active
-        rate unit -- everything x60 and relabeled in per-minute mode."""
-        if per_min():
+        rate unit -- same numbers x60 / x3600 and relabeled in per-minute /
+        per-hour mode."""
+        mode = unit_mode()
+        if mode == "min":
             return ("DPM", "HPM", "DTPM", "PET DPM", "PET DTPM", "/m")
+        if mode == "hour":
+            return ("DPH", "HPH", "DTPH", "PET DPH", "PET DTPH", "/h")
         return ("DPS", "HPS", "DTPS", "PET DPS", "PET DTPS", "/s")
 
     root = tk.Tk()
@@ -465,7 +504,7 @@ def run_overlay(log_path):
         SPELL_DB.set_game_dir_hint(os.path.dirname(os.path.dirname(path)))
         tracker = CombatTracker(
             self_name=char_name_from(path),
-            idle_timeout=float(settings.get("idle_timeout", 45)))
+            idle_timeout=active_timeout())
         watcher = LogWatcher(path)
         watcher.add_handler(tracker.handle_line)
         watcher.seed()
@@ -615,8 +654,9 @@ def run_overlay(log_path):
                      "tps_d": rs("dmg_in", window, cats=DS_CATS) / eff,
                      "pet_dps": rs("pet_out", window) / eff,
                      "pet_tps": rs("pet_in", window) / eff}
-        if per_min():
-            rates = {k: v * 60.0 for k, v in rates.items()}
+        f = unit_factor()
+        if f != 1.0:
+            rates = {k: v * f for k, v in rates.items()}
         return rates
 
     # (term label, rate-key suffix, always shown?) -- song and ds only
@@ -639,8 +679,8 @@ def run_overlay(log_path):
             parts.append((lbl, a["disp"]))
         if w < 240:
             short = {"melee": "m", "spell": "s", "song": "sg", "ds": "ds"}
-            return "·".join(f"{short[l]} {v:.0f}" for l, v in parts)
-        return " · ".join(f"{l} {v:.0f}" for l, v in parts)
+            return "·".join(f"{short[l]} {fmt_rate(v)}" for l, v in parts)
+        return " · ".join(f"{l} {fmt_rate(v)}" for l, v in parts)
 
     def draw_segment_row_vertical(y, w, th, label, dps_val, pct_txt, max_dps,
                                   color, amount_txt=None, rate_txt=None):
@@ -735,7 +775,7 @@ def run_overlay(log_path):
             draw_text(8, y, anchor="w", text=label, fill=th["dim"],
                                font=mono(9, "bold"))
             draw_text(w - 8, y, anchor="e",
-                               text=f"{a['disp']:.0f}" if is_live else "--",
+                               text=fmt_rate(a['disp']) if is_live else "--",
                                fill=color, font=mono(14, "bold"))
             y += row_big
             if has_split:
@@ -755,7 +795,7 @@ def run_overlay(log_path):
                 draw_text(8, y, anchor="w", text=label,
                                    fill=th["dim"], font=mono(8, "bold"))
                 draw_text(w - 8, y, anchor="e",
-                                   text=f"{a['disp']:.0f}" if is_live else "--",
+                                   text=fmt_rate(a['disp']) if is_live else "--",
                                    fill=color, font=mono(11, "bold"))
                 y += row_pet
 
@@ -776,8 +816,8 @@ def run_overlay(log_path):
         for label, key in SEGMENTS:
             amt = vals[key]
             pct = 0 if vals["dmg_all"] == 0 else round(100 * amt / vals["dmg_all"])
-            rate_txt = (f"{seg_dps[label] * (60.0 if per_min() else 1.0):.0f}"
-                        f"{unit_sfx}") if is_live else None
+            rate_txt = (fmt_rate(seg_dps[label] * unit_factor())
+                        + unit_sfx) if is_live else None
             draw_segment_row_vertical(y, w, th, label, seg_dps[label],
                                       f"{pct}%" if is_live else "--",
                                       max_seg_dps, seg_colors[label],
@@ -919,7 +959,7 @@ def run_overlay(log_path):
                     text=_split_text(key, vals, 0),   # always abbreviated
                     fill=th["dim"], font=mono(7))
             draw_text(cx, 24, anchor="nw",
-                               text=f"{a['disp']:.0f}" if is_live else "--",
+                               text=fmt_rate(a['disp']) if is_live else "--",
                                fill=color, font=mono(18, "bold"))
 
         canvas.create_line(6, 56, w - 6, 56, fill=th["dim"])
@@ -931,7 +971,7 @@ def run_overlay(log_path):
         show_amt = settings.get("seg_show_amount", False)
         for i, (label, key) in enumerate(SEGMENTS):
             amt = vals[key]
-            seg_dps = amt / elapsed * (60.0 if per_min() else 1.0)
+            seg_dps = amt / elapsed * unit_factor()
             pct = 0 if vals["dmg_all"] == 0 else round(100 * amt / vals["dmg_all"])
             cx = 10 + i * col5
             draw_text(cx, 62, anchor="nw", text=label,
@@ -942,7 +982,7 @@ def run_overlay(log_path):
                 # actual damage dealt; the % keeps its usual spot
                 txt = f"{_fmt_num(amt)} ({pct}%)"
             else:
-                txt = f"{seg_dps:.0f}{unit_sfx} ({pct}%)"
+                txt = f"{fmt_rate(seg_dps)}{unit_sfx} ({pct}%)"
             draw_text(cx, 76, anchor="nw", text=txt,
                                fill=th["fg"], font=mono(9, "bold"))
 
@@ -963,10 +1003,10 @@ def run_overlay(log_path):
                 pd, pt = get_anim("pet_dps"), get_anim("pet_tps")
                 pd["disp"] += (pd["target"] - pd["disp"]) * BAR_EASE
                 pt["disp"] += (pt["target"] - pt["disp"]) * BAR_EASE
-                u = "dpm" if per_min() else "dps"
-                ut = "dtpm" if per_min() else "dtps"
-                pet_bits = (f"pet {pd['disp']:.0f}{u}/"
-                            f"{pt['disp']:.0f}{ut}{pad}")
+                u, ut = {"sec": ("dps", "dtps"), "min": ("dpm", "dtpm"),
+                         "hour": ("dph", "dtph")}[unit_mode()]
+                pet_bits = (f"pet {fmt_rate(pd['disp'])}{u}/"
+                            f"{fmt_rate(pt['disp'])}{ut}{pad}")
             else:
                 pet_bits = f"pet --{pad}"
         summary = (f"{combat_bits}{pad}{pet_bits}"
@@ -1048,10 +1088,10 @@ def run_overlay(log_path):
         if in_combat:
             # show the fight's wall-clock span; rates divide by ACTIVE time
             m, s = divmod(int(fight.span()), 60)
-            elapsed_txt = f"{m}:{s:02d}"
+            hrs, m = divmod(m, 60)
+            elapsed_txt = f"{hrs}:{m:02d}:{s:02d}" if hrs else f"{m}:{s:02d}"
         badge = RATE_BADGE.get(settings.get("rate_mode", "fight"), "avg")
-        if per_min():
-            badge += "·/min"
+        badge += {"sec": "", "min": "·/min", "hour": "·/hr"}[unit_mode()]
         status_lbl.configure(
             text=("● LIVE " if in_combat else "idle ")
                  + elapsed_txt + f" · {badge}")
@@ -1082,10 +1122,12 @@ def run_overlay(log_path):
     def set_units(name):
         settings["units"] = name
         settings.save()
-        anim.clear()   # x60 jump would look silly eased
+        # each unit mode keeps its own Combat timeout -- swap it in
+        live["tracker"].idle_timeout = active_timeout()
+        anim.clear()   # x60/x3600 jump would look silly eased
 
     def set_timeout(v):
-        settings["idle_timeout"] = v
+        settings[TIMEOUT_KEYS[unit_mode()]] = v
         settings.save()
         live["tracker"].idle_timeout = float(v)   # applies immediately
 
@@ -1195,10 +1237,16 @@ def run_overlay(log_path):
         m.add_cascade(label="Rate units", menu=unit_menu)
 
         to_menu = tk.Menu(m, tearoff=0)
-        cur_to = settings.get("idle_timeout", 45)
-        for v in TIMEOUT_CHOICES:
+        cur_to = active_timeout()
+        for v in TIMEOUT_CHOICES[unit_mode()]:
             mark = "● " if abs(cur_to - v) < 0.5 else "   "
-            to_menu.add_command(label=f"{mark}{v}s without damage",
+            if v % 3600 == 0:
+                txt = f"{v // 3600}h"
+            elif v % 60 == 0:
+                txt = f"{v // 60}m"
+            else:
+                txt = f"{v}s"
+            to_menu.add_command(label=f"{mark}{txt} without damage",
                                 command=lambda v=v: set_timeout(v))
         m.add_cascade(label="Combat timeout", menu=to_menu)
 
