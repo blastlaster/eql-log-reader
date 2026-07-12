@@ -19,6 +19,8 @@ The Session Report's Spells cast table gains **Fizzled** and **Interrupted** col
 
 Two more confirmed from a later log: **incoming resists** use `You resist a lesser mummy's Rabies!` (counted in "Resisted by you"), and **bard song interruptions** log `Your melody has been interrupted!` (counted with interrupts).
 
+**Code-signing plumbing.** The build pipeline can now sign everything (the four tool EXEs, the installer, and its uninstaller) once a certificate is configured — copy `signing.example.bat` to `signing.bat` and fill in one line (see BUILDING.md "Code signing" for certificate options). This is what will eventually remove the Windows SmartScreen "Publisher: Unknown" warnings on download/install; until the certificate lands, the README documents the click-through.
+
 **Misc.** "... is healed from within." (the Budding Heal line's delayed-heal trigger firing on someone else) is recognized and ignored instead of landing in the calibration tab; first-person chat ("You tell General:1, ...") no longer leaks into the calibration tab when it quotes combat words.
 
 **Buff tracking survives auto-played bard songs (Symphonic Aura).** The aura logs no "You begin singing..." lines — only the pulse and fade messages — which exposed three tracking bugs, confirmed against a real log:

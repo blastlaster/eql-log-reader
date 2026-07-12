@@ -17,6 +17,26 @@ if not exist "dist\EQL Log Reader\eql_launcher.exe" (
     exit /b 1
 )
 
+rem -- optional code signing (see BUILDING.md "Code signing") -----------
+rem    Create signing.bat from signing.example.bat once you have a
+rem    certificate; it sets EQL_SIGN to a "signtool sign ..." command
+rem    prefix. When set, the four tool EXEs are signed here and Inno
+rem    Setup signs the installer + uninstaller. Without it, the build
+rem    is unchanged (unsigned, SmartScreen will warn users).
+if exist "%~dp0signing.bat" call "%~dp0signing.bat"
+if defined EQL_SIGN (
+    echo Signing tool executables ...
+    for %%F in (eql_launcher eql_friend_overlay eql_dps_meter eql_session_report) do (
+        !EQL_SIGN! "dist\EQL Log Reader\%%F.exe"
+        if errorlevel 1 (
+            echo [ERROR] Signing dist\EQL Log Reader\%%F.exe failed.
+            pause
+            exit /b 1
+        )
+    )
+    echo.
+)
+
 set "ISCC="
 
 rem -- explicit, known install locations, newest first. Inno Setup 7
@@ -72,7 +92,14 @@ if not defined ISCC (
 
 echo Using: %ISCC%
 echo.
-"%ISCC%" "installer.iss"
+if defined EQL_SIGN (
+    rem Inno's /S value can't carry raw quotes -- swap them for its $q
+    rem placeholder so signtool paths with spaces survive.
+    set "EQL_SIGN_ISCC=!EQL_SIGN:"=$q!"
+    "%ISCC%" "/Seqlsign=!EQL_SIGN_ISCC! $f" /DSIGN "installer.iss"
+) else (
+    "%ISCC%" "installer.iss"
+)
 if errorlevel 1 (
     echo [ERROR] Inno Setup compile failed -- see the output above.
     pause

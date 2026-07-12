@@ -33,6 +33,14 @@ SolidCompression=yes
 SetupIconFile=icon.ico
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
+; Code signing: make_installer.bat passes /DSIGN plus an "eqlsign"
+; SignTool definition when signing.bat provides a certificate command
+; (see BUILDING.md "Code signing"); the installer and its uninstaller
+; both get signed. Unsigned builds skip this entirely.
+#ifdef SIGN
+SignTool=eqlsign
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

@@ -12,6 +12,15 @@ writes, so they're safe to run alongside the game.
 Requires the game to run in Windowed or Borderless-Windowed mode (true
 exclusive fullscreen draws over everything, including overlays).
 
+> **Windows SmartScreen note:** the installer is not yet code-signed, so
+> Windows may warn that it "isn't commonly downloaded" (browser) and show
+> "Publisher: Unknown" (installer). That's the standard warning for any
+> unsigned download, not a detection of anything harmful — the tools only
+> read the game's log file, and the full source is this repository, so you
+> can audit or build it yourself (see BUILDING.md). To proceed: choose
+> **Keep** on the download, then **More info → Run anyway** at install.
+> Code signing to remove the warning entirely is in progress.
+
 ## The tools
 
 **Launcher** (`eql_launcher.py`) — control panel. Auto-detects every

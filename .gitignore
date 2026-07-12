@@ -13,3 +13,7 @@ __pycache__/
 build/
 dist/
 Output/
+
+# code-signing config -- machine-specific cert selection; copy
+# signing.example.bat to signing.bat and fill in (see BUILDING.md)
+signing.bat

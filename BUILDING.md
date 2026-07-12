@@ -51,18 +51,49 @@ already covered by `.gitignore` additions below).
 - `build_exe.bat` -- PyInstaller build driver.
 - `installer.iss` -- Inno Setup project (edit `MyAppVersion` here each
   release).
-- `make_installer.bat` -- compiles `installer.iss` into Setup.exe.
+- `make_installer.bat` -- compiles `installer.iss` into Setup.exe; signs
+  everything first when `signing.bat` exists (see "Code signing" below).
+- `signing.example.bat` -- template for the (git-ignored) `signing.bat`
+  code-signing config.
+
+## Code signing
+
+Unsigned installers trip Windows SmartScreen on download AND on install
+("Publisher: Unknown", "not commonly downloaded") -- users have to click
+through two scary prompts. Signing fixes the "Unknown publisher" half
+immediately; the "not commonly downloaded" half fades as reputation
+accrues on the certificate (keep signing every release with the same
+cert -- reputation transfers to new versions).
+
+**Getting a certificate** (one-time decision; identity verification is
+part of all of them):
+
+- **Azure Trusted Signing** -- ~$9.99/month. Microsoft's own service;
+  best SmartScreen standing since Microsoft itself vets the identity.
+  Check current availability for individual (non-company) accounts.
+- **Certum Open Source Code Signing** -- ~EUR 70/year (+ card/reader or
+  their SimplySign cloud app). The budget classic for open-source
+  projects; an OV cert, so reputation still builds over some weeks.
+- **SignPath Foundation** -- free for qualifying open-source projects,
+  but releases must be built through their CI pipeline (GitHub Actions),
+  not on your machine.
+- Standard OV/EV certs from DigiCert/Sectigo/SSL.com ($200-500/year)
+  buy the same thing at brand-name prices; EV is overkill here.
+
+**Wiring it up** (already plumbed): copy `signing.example.bat` to
+`signing.bat` (git-ignored) and fill in the variant matching your
+certificate. From then on `make_installer.bat` automatically signs the
+four tool EXEs, the installer, and its uninstaller. Always keep the
+timestamp arguments (`/tr` + `/td`) so signatures outlive the cert.
+
+**Until then**: the warning is a false positive common to all unsigned
+PyInstaller output. Users can click "Keep" on the download and
+"More info" -> "Run anyway" at install. Submitting each release to
+Microsoft's false-positive review (https://www.microsoft.com/wdsi/filesubmission,
+"Software developer" option) helps the Defender side; only signing +
+reputation clears SmartScreen properly.
 
 ## Notes
-
-- **Antivirus/SmartScreen**: PyInstaller exes and unsigned installers
-  routinely get flagged by Windows SmartScreen ("Windows protected your PC")
-  and sometimes by individual antivirus engines -- this is a false positive
-  common to all unsigned PyInstaller output, not a sign anything is wrong.
-  Players can click "More info" -> "Run anyway". If you want to get rid of
-  this warning entirely, you'd need a code-signing certificate (there's a
-  cost and identity-verification process involved) -- not necessary just to
-  get this working for friends/guild.
 - **No Python required on the player's machine.** PyInstaller bundles a
   private Python runtime into the bundle, so players don't install anything
   but your Setup.exe.
