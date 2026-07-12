@@ -143,6 +143,13 @@ SESSION_START_RE = re.compile(TS_RE + r"Welcome to EverQuest Legends!\s*$")
 # this is a buff-list cleanup point; see _clear_stale_buffs_on_zone
 ZONE_RE = re.compile(TS_RE + r"LOADING, PLEASE WAIT\.\.\.\s*$")
 
+# spell housekeeping -- confirmed formats; matched-and-ignored because spell
+# NAMES ("Spell: Flowering Heal") contain combat keywords and would land in
+# the calibration list otherwise
+SPELL_HOUSEKEEPING_RE = re.compile(
+    TS_RE + r"(?:You purchased \d|Beginning to (?:scribe|memorize) "
+            r"|You have finished (?:scribing|memorizing) )")
+
 # Data model (per the user's spec):
 #   SESSION -- starts at "Welcome to EverQuest Legends!" (login). ALL
 #     session-scoped state resets there, so numbers never mix play sessions
@@ -678,6 +685,7 @@ class CombatTracker:
         # the raw message text in quotes -- honest about ambiguity.
         self.active_buffs = {}       # label -> wall time it landed
         self._active_buff_cands = {}  # label -> set of candidate spell names
+        self._buff_self_expiry = {}  # label -> estimated end, SELF-cast only
         self.buff_gains = {}         # label -> times gained this session
         self.buff_fades = {}         # label -> times faded this session
         self.buff_uptime = {}        # label -> completed-stretch seconds
@@ -1023,9 +1031,35 @@ class CombatTracker:
     def _close_buff(self, label, wall_time):
         start = self.active_buffs.pop(label, None)
         self._active_buff_cands.pop(label, None)
+        self._buff_self_expiry.pop(label, None)
         if start is not None:
             self.buff_uptime[label] = \
                 self.buff_uptime.get(label, 0.0) + max(wall_time - start, 0.0)
+
+    def _close_fade_trigger_parent(self, trigger_ids, wall_time):
+        """An instant "trigger" landing can mark the END of the buff that
+        spawned it: seed heals (the Budding Heal line) cast their "* Heal
+        Trigger" via SPA 289 exactly when the seed expires, and the seed
+        itself prints no fade line of its own. Close the active buff that
+        links to one of these trigger ids."""
+        def links(label):
+            names = [label] if not label.startswith('"') \
+                else self._active_buff_cands.get(label) or ()
+            return any(
+                (info := SPELL_DB.lookup(n)) and
+                info.fade_trigger_ids() & trigger_ids
+                for n in names)
+        matches = [lbl for lbl in self.active_buffs if links(lbl)]
+        if not matches:
+            return
+        if len(matches) > 1:   # several seeds up -- the one nearest its end
+            matches.sort(key=lambda l: abs(
+                wall_time - (self._buff_est_end(l) or float("inf"))))
+        label = matches[0]
+        self._close_buff(label, wall_time)
+        self.buff_fades[label] = self.buff_fades.get(label, 0) + 1
+        self.buff_events.append((wall_time, label, "faded"))
+        self._notify()
 
     def _clear_stale_buffs_on_zone(self, wall_time):
         """Zoning silently strips bard songs (regular buffs persist), and
@@ -1103,11 +1137,27 @@ class CombatTracker:
             infos = [info] if info else \
                 [SPELL_DB.lookup(c) for c in landed]
             if infos and all(i and i.duration_ticks() == 0 for i in infos):
+                # ...but an instant can still be the death knell of a buff
+                # that spawns it on expiry (seed heals' "* Heal Trigger")
+                self._close_fade_trigger_parent(
+                    {i.id for i in infos}, wall_time)
                 return True
             if label in self.active_buffs:  # recast before it faded --
                 self._close_buff(label, wall_time)  # bank the stretch
             self.active_buffs[label] = wall_time
             self._active_buff_cands[label] = set(landed)
+            # Buffs YOU cast expire on their own clock (see the sweep in
+            # handle_line): the caster's level is your own, so the duration
+            # estimate doesn't suffer the unknown-caster-level problem, and
+            # some (seed heals at full health) print nothing when they end.
+            pending = self._pending_casts.get(YOU_LABEL)
+            dur = info.duration_seconds(self.player_level or 50) \
+                if info else 0
+            if pending and pending[0] == label and dur and dur > 0 \
+               and pending[1] + self.BUFF_CAST_SLACK >= wall_time:
+                self._buff_self_expiry[label] = wall_time + dur
+            else:
+                self._buff_self_expiry.pop(label, None)
             self.buff_gains[label] = self.buff_gains.get(label, 0) + 1
             self.buff_events.append((wall_time, label, "gained"))
             self._notify()
@@ -1223,6 +1273,16 @@ class CombatTracker:
         if self.session_start_wall is None:
             self.session_start_wall = wall_time
         self._last_line_wall = max(self._last_line_wall, wall_time)
+
+        # sweep expired SELF-cast buffs (their estimated end is reliable --
+        # you are the caster). 2s of slack absorbs timestamp rounding; the
+        # uptime stretch banks at the estimated end, not the sweep moment.
+        if self._buff_self_expiry:
+            for lbl, end in list(self._buff_self_expiry.items()):
+                if wall_time > end + 2.0:
+                    self._close_buff(lbl, end)
+                    self.buff_events.append((end, lbl, "faded"))
+                    self._notify()
 
         # session boundary: login banner -> wipe ALL session-scoped state
         if SESSION_START_RE.match(line):
@@ -1573,6 +1633,10 @@ class CombatTracker:
 
         if REGEN_RE.match(line):
             return   # HoT tick with spells_us_str.txt unavailable -- see REGEN_RE
+
+        if SPELL_HOUSEKEEPING_RE.match(line):
+            return   # buying/scribing/memorizing -- spell NAMES ("Flowering
+                     # Heal") would otherwise trip the calibration keywords
 
         # nothing matched -- keep combat-flavored lines around for calibration
         if re.search(r"\bdamage\b|\bheal(?:s|ed)?\b|\bslain\b|\bcritical\b"

@@ -657,6 +657,14 @@ class SpellInfo:
         lvls = [l for l in self.classes if 0 <= l <= 125]
         return min(lvls) if lvls else None
 
+    def fade_trigger_ids(self):
+        """Spell ids this buff casts automatically when it EXPIRES (SPA 289,
+        trigger-on-fade) -- e.g. every Budding Heal line seed casts its
+        "* Heal Trigger" at the moment the seed ends, which is the only
+        log-visible signal of that ending."""
+        return {e.base_value for e in self.effects
+                if e.effect_id == 289 and e.base_value > 0}
+
     def hp_effects(self):
         """Effects carrying an HP magnitude -- SPA 0 (the generic heal/
         damage slot), SPA 79 (instant HP), and SPA 100 (heal-over-time).
