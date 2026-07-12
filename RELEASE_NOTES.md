@@ -2,6 +2,12 @@
 
 ## What's new in v1.5
 
+**New Session Report tab: Encounters — per-mob fight history across every session.** Every completed Combat in the whole log becomes an encounter, grouped by the mob it was against. Search a name, see every attempt (when, session, zone, duration, DPS, damage dealt/taken, deaths, stance — best attempt starred), open one for full detail (damage/healing by ability with shares, casts, resists, rates at /s /m /h), and compare any two — or hit **Compare best vs worst** — for a side-by-side plus a ranked **"what changed"** analysis pointing at the likely impact drivers: ability-mix shares, stance/invocation, spells-resisted rate, damage taken, accuracy, crit, deaths, and spells cast in one attempt but not the other. The log is the database — history reaches as far back as the log file does, no new files.
+
+**Fight summary popup (meter).** When a Combat ends, a small draggable window pops up next to the meter with that fight's numbers: who it was against, DPS/DPM/DPH, dealt/taken/healed, accuracy/crit/big, kills/deaths, stance, resists, and a **filterable** damage/healing/cast breakdown. It refreshes in place when the next fight ends, never fires during log seeding/backfill, and toggles via right-click → "Fight summary popup".
+
+**Under the hood:** each Fight now carries its own per-fight ability, heal, and cast breakdowns plus kill/death counts (session-wide totals unchanged), and the tracker exposes a completed-fight hook that both features build on.
+
 **Text size presets: Elder and Legend.** For eyes that want bigger text: the Friends Overlay and the DPS/HPS Meter gain a right-click **Text size** menu — Standard (100%), **Elder (200%)**, and **Legend (250%)**. Fonts and layout scale together, independently of the existing Size (element footprint) setting, and the choice persists per overlay.
 
 **Horizontal layout: no more clipping.** The bottom stat strips (fight stats, ALL TIME, BUFFS, RESISTED) used to be fixed single lines — a long ALL TIME row (stance + invocation shares) ran off both edges of the canvas. They now wrap onto extra centered lines and the canvas grows to fit, breaking at the natural group boundaries (stats | stance shares | invocation shares) rather than mid-group.

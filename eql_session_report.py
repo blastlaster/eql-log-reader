@@ -45,6 +45,15 @@ Tabs
                   PERSONAL RECORDS persist to a per-character JSON across
                   runs -- beat one and it's flagged NEW RECORD.
                   Double-click a session row to open that session.
+* Encounters   -- every mob you've fought across EVERY session in the
+                  log: search a name, see each attempt (when, session,
+                  zone, duration, DPS, damage dealt/taken, deaths,
+                  stance), open one for its full detail (abilities,
+                  heals, casts, resists, rates at /s /m /h), and compare
+                  two -- best-vs-worst in one click -- with a ranked
+                  "what changed" analysis of the likely impact drivers
+                  (ability mix shares, stance/invocation, resist rate,
+                  damage taken, accuracy, deaths).
 * Diagnostics  -- Passive Healing (est.) reference math and the
                   unrecognized-lines calibration view.
 
@@ -77,8 +86,8 @@ from datetime import datetime
 from tkinter import ttk, filedialog
 
 from eql_combat_tracker import (
-    CombatTracker, YOU_LABEL, STANCES, INVOCATIONS, CATEGORY_LABELS,
-    CATEGORIES,
+    CombatTracker, YOU_LABEL, PET_LABEL, STANCES, INVOCATIONS,
+    CATEGORY_LABELS, CATEGORIES,
 )
 from eql_overlay_common import Settings, RETRO_THEMES, DEFAULT_THEME, get_theme
 from eql_spell_db import SPELL_DB, CLASS_NAMES
@@ -246,6 +255,140 @@ def summarize_session(sess, log_path):
         "biggest": biggest,
         "heal": tr.heal_out_total,
     }
+
+
+# -- encounters: per-mob fight history across every session ------------------
+# The log IS the database: every completed Fight in every session becomes an
+# "encounter" dict, grouped by the mob it was mostly against. Cross-session
+# comparison (best vs worst attempt on the same boss) falls out for free.
+
+_ARTICLE_RE = re.compile(r"^(?:an?|the)\s+", re.IGNORECASE)
+
+
+def _mob_key(name):
+    """Grouping key for a mob name: article-free, case-insensitive."""
+    return _ARTICLE_RE.sub("", name).strip().lower()
+
+
+def encounter_from_fight(fight, si, sess):
+    """One completed Fight -> encounter dict, or None if it had no enemy
+    (e.g. a heal-only stretch)."""
+    you = fight.actors.get(YOU_LABEL)
+    mobs = fight.enemies()
+    if not you or not mobs or you["dmg_out"] + you["dmg_in"] <= 0:
+        return None
+    active = fight.elapsed()
+    swings = you["hits"] + you["misses"]
+    when = datetime.fromtimestamp(fight.start_wall)
+    return {
+        "mob": mobs[0][0],
+        "mob_key": _mob_key(mobs[0][0]),
+        "mobs": [(n, a["dmg_in"], a["dmg_out"]) for n, a in mobs],
+        "session_i": si, "session_ts": sess["ts"], "zone": sess["zone"],
+        "start": fight.start_wall,
+        "when": when.strftime("%a %b %d %H:%M"),
+        "span": fight.span(), "active": active,
+        "dps": you["dmg_out"] / active,
+        "dtps": you["dmg_in"] / active,
+        "dmg": you["dmg_out"], "taken": you["dmg_in"],
+        "healed": you["heal_out"],
+        "acc": round(100 * you["hits"] / swings) if swings else 0,
+        "critpct": round(100 * you["crits"] / you["hits"]) if you["hits"] else 0,
+        "big": you["biggest_hit"],
+        "kills": fight.kills, "deaths": fight.deaths,
+        "stance": fight.stance or "?",
+        "invocation": fight.invocation or "?",
+        "abilities": {k: dict(v) for k, v in fight.abilities_dmg.items()},
+        "heals": {k: dict(v) for k, v in fight.abilities_heal.items()},
+        "casts": dict(fight.spell_casts),
+        "resists": dict(fight.spell_resists),
+    }
+
+
+def collect_encounters(log_path, sessions):
+    """Replay every session, collecting each completed fight."""
+    SPELL_DB.set_game_dir_hint(os.path.dirname(os.path.dirname(log_path)))
+    out = []
+    me = char_name_from(log_path)
+    for si, sess in enumerate(sessions):
+        tracker = CombatTracker(self_name=me)
+        fights = []
+        tracker.fight_listeners.append(fights.append)
+        for line in sess["lines"]:
+            tracker.handle_line(line)
+        tracker.force_end_fight()
+        for f in fights:
+            enc = encounter_from_fight(f, si, sess)
+            if enc:
+                out.append(enc)
+    return out
+
+
+def encounter_diff(a, b):
+    """Ranked, plain-language differences between encounter `a` (the better
+    one) and `b` (the worse one) -- what changed, biggest likely impact
+    first. Heuristic: relative deltas of the levers you control (ability
+    mix, stance, resists, damage taken), scored by magnitude."""
+    diffs = []
+
+    def add(score, text):
+        diffs.append((score, text))
+
+    if b["dps"] > 0:
+        rel = (a["dps"] - b["dps"]) / b["dps"]
+        add(999, f"your DPS: {a['dps']:.1f} vs {b['dps']:.1f} "
+                 f"({rel:+.0%})")
+    if a["stance"] != b["stance"]:
+        add(3.0, f"stance: {a['stance']} vs {b['stance']}")
+    if a["invocation"] != b["invocation"]:
+        add(2.5, f"invocation: {a['invocation']} vs {b['invocation']}")
+
+    # ability mix: share of your damage per ability
+    sa = {k: v["total"] / max(a["dmg"], 1) for k, v in a["abilities"].items()}
+    sb = {k: v["total"] / max(b["dmg"], 1) for k, v in b["abilities"].items()}
+    for name in sorted(set(sa) | set(sb)):
+        pa, pb = sa.get(name, 0.0), sb.get(name, 0.0)
+        d = pa - pb
+        if abs(d) >= 0.08:
+            add(abs(d) * 6,
+                f"{name}: {pa:.0%} of your damage vs {pb:.0%}")
+
+    # resists per active minute -- casts that did nothing
+    ra = sum(a["resists"].values()) / a["active"] * 60
+    rb = sum(b["resists"].values()) / b["active"] * 60
+    if abs(ra - rb) >= 0.5:
+        add(min(abs(ra - rb) / 2, 4),
+            f"spells resisted/min: {ra:.1f} vs {rb:.1f}")
+
+    if b["dtps"] > 0.5 or a["dtps"] > 0.5:
+        rel = (a["dtps"] - b["dtps"]) / max(b["dtps"], 0.5)
+        if abs(rel) >= 0.25:
+            add(min(abs(rel), 3),
+                f"damage taken/s: {a['dtps']:.1f} vs {b['dtps']:.1f}")
+    if abs(a["acc"] - b["acc"]) >= 4:
+        add(abs(a["acc"] - b["acc"]) / 10,
+            f"melee accuracy: {a['acc']}% vs {b['acc']}%")
+    if abs(a["critpct"] - b["critpct"]) >= 3:
+        add(abs(a["critpct"] - b["critpct"]) / 12,
+            f"crit rate: {a['critpct']}% vs {b['critpct']}%")
+
+    only_a = sorted(set(a["casts"]) - set(b["casts"]))
+    only_b = sorted(set(b["casts"]) - set(a["casts"]))
+    if only_a:
+        add(1.5, "cast only in the better fight: " + ", ".join(only_a))
+    if only_b:
+        add(1.5, "cast only in the worse fight: " + ", ".join(only_b))
+
+    ha = a["healed"] / a["active"]
+    hb = b["healed"] / b["active"]
+    if abs(ha - hb) >= 1 and max(ha, hb) > 0:
+        add(min(abs(ha - hb) / max(hb, 1), 2),
+            f"your healing/s: {ha:.1f} vs {hb:.1f}")
+    if a["deaths"] != b["deaths"]:
+        add(5.0, f"deaths: {a['deaths']} vs {b['deaths']}")
+
+    diffs.sort(key=lambda kv: -kv[0])
+    return [t for _, t in diffs]
 
 
 def _fmt_num(n):
@@ -594,7 +737,8 @@ def _report_window(ctx, settings):
                              values=list(THEME_LABELS.values()), width=16)
     theme_box.pack(side="left", padx=(2, 0))
 
-    state = {"tracker": None, "sessions": load_sessions(log_path),
+    state = {"tracker": None, "encounters": None,
+             "sessions": load_sessions(log_path),
              "summaries": None, "records": {}, "new_records": set()}
 
     def on_theme_pick(_e):
@@ -612,6 +756,7 @@ def _report_window(ctx, settings):
     def reload_session_list():
         state["sessions"] = load_sessions(log_path)
         state["summaries"] = None   # stale -- rebuilt lazily
+        state["encounters"] = None
         labels = [s["label"] for s in state["sessions"]] or ["(empty log)"]
         session_box.configure(values=labels)
         session_box.current(len(labels) - 1)   # default: most recent
@@ -1102,6 +1247,286 @@ def _report_window(ctx, settings):
             nb.select(dash_outer)
 
     sess_tree.bind("<Double-Button-1>", open_session_row)
+
+    # ==========================================================================
+    # Encounters tab -- per-mob fight history across EVERY session in the
+    # log, with best-vs-worst comparison and ranked what-changed analysis
+    # ==========================================================================
+    enc_frame = tk.Frame(nb, padx=8, pady=6, bg=BG)
+    nb.add(enc_frame, text="Encounters")
+
+    enc_top = tk.Frame(enc_frame, bg=BG)
+    enc_top.pack(fill="x")
+    tk.Label(enc_top, text="Search mob:", font=FONT_SMALL, bg=BG,
+             fg=INK).pack(side="left")
+    enc_search_var = tk.StringVar()
+    enc_search = tk.Entry(enc_top, textvariable=enc_search_var, font=FONT,
+                          width=22, bg=PANEL, fg=INK, insertbackground=INK,
+                          relief="flat")
+    enc_search.pack(side="left", padx=(2, 10), ipady=2)
+    tk.Label(enc_top, bg=BG, fg=SUBTLE, font=FONT_SMALL,
+             text="pick a mob → its fights · select one for details, two "
+                  "(Ctrl-click) to compare · or Compare best vs worst"
+             ).pack(side="left")
+
+    enc_mid = tk.Frame(enc_frame, bg=BG)
+    enc_mid.pack(fill="x", pady=(4, 0))
+
+    mob_tree = ttk.Treeview(enc_mid,
+                            columns=("fights", "deaths", "best", "worst"),
+                            show="tree headings", height=9)
+    for col, label, w in (("fights", "Fights", 50), ("deaths", "Deaths", 50),
+                          ("best", "Best DPS", 65), ("worst", "Worst DPS", 65)):
+        mob_tree.heading(col, text=label)
+        mob_tree.column(col, width=w, anchor="center")
+    mob_tree.column("#0", width=170)
+    mob_tree.heading("#0", text="Mob")
+    mob_tree.pack(side="left", fill="y")
+    setup_stripes(mob_tree)
+
+    fight_tree = ttk.Treeview(
+        enc_mid,
+        columns=("when", "zone", "dur", "dps", "dealt", "taken", "deaths",
+                 "stance"),
+        show="tree headings", height=9)
+    for col, label, w in (("when", "When", 115), ("zone", "Zone", 95),
+                          ("dur", "Length", 55), ("dps", "DPS", 60),
+                          ("dealt", "Dealt", 60), ("taken", "Taken", 60),
+                          ("deaths", "Deaths", 50), ("stance", "Stance", 105)):
+        fight_tree.heading(col, text=label)
+        fight_tree.column(col, width=w,
+                          anchor="w" if col in ("when", "zone", "stance")
+                          else "center")
+    fight_tree.column("#0", width=30)
+    fight_tree.heading("#0", text="#")
+    fight_tree.pack(side="left", fill="both", expand=True, padx=(6, 0))
+    setup_stripes(fight_tree)
+
+    enc_btns = tk.Frame(enc_frame, bg=BG)
+    enc_btns.pack(fill="x", pady=(4, 0))
+    cmp_bw_btn = tk.Button(enc_btns, text="Compare best vs worst",
+                           font=FONT_SMALL, relief="flat",
+                           bg=PANEL, fg=ACCENT, activebackground=BG)
+    cmp_bw_btn.pack(side="left")
+    cmp_sel_btn = tk.Button(enc_btns, text="Compare selected (2)",
+                            font=FONT_SMALL, relief="flat",
+                            bg=PANEL, fg=ACCENT, activebackground=BG)
+    cmp_sel_btn.pack(side="left", padx=(6, 0))
+    enc_status = tk.Label(enc_btns, bg=BG, fg=SUBTLE, font=FONT_SMALL,
+                          anchor="w")
+    enc_status.pack(side="left", padx=(12, 0))
+
+    enc_txt = tk.Text(enc_frame, wrap="word", bg=PANEL, fg=INK,
+                      font=FONT_MONO, relief="flat", height=15,
+                      state="disabled")
+    enc_txt.pack(fill="both", expand=True, pady=(4, 0))
+    enc_txt.tag_configure("h", foreground=ACCENT,
+                          font=(FONT_MONO[0], 10, "bold"))
+    enc_txt.tag_configure("b", font=(FONT_MONO[0], 10, "bold"))
+    enc_txt.tag_configure("dim", foreground=SUBTLE)
+    enc_txt.tag_configure("good", foreground=GOOD)
+    enc_txt.tag_configure("warn", foreground=RECORD)
+
+    enc_ui = {"order": [], "rows": []}
+
+    def _enc_put(text, tag=None):
+        enc_txt.insert("end", text, (tag,) if tag else ())
+
+    def ensure_encounters():
+        if state["encounters"] is None:
+            enc_status.config(text="replaying log…")
+            root.config(cursor="watch")
+            root.update_idletasks()
+            try:
+                state["encounters"] = collect_encounters(
+                    log_path, state["sessions"])
+            finally:
+                root.config(cursor="")
+            n = len(state["encounters"])
+            enc_status.config(text=f"{n} encounters across "
+                                   f"{len(state['sessions'])} sessions")
+        return state["encounters"]
+
+    def _enc_groups():
+        groups = {}
+        for e in ensure_encounters():
+            g = groups.setdefault(e["mob_key"], {"name": e["mob"],
+                                                 "list": []})
+            g["list"].append(e)
+        return groups
+
+    def refresh_mob_tree(*_):
+        groups = _enc_groups()
+        q = enc_search_var.get().strip().lower()
+        mob_tree.delete(*mob_tree.get_children())
+        enc_ui["order"] = []
+        for key in sorted(groups, key=lambda k: -len(groups[k]["list"])):
+            if q and q not in key:
+                continue
+            lst = groups[key]["list"]
+            best = max(e["dps"] for e in lst)
+            worst = min(e["dps"] for e in lst)
+            striped_insert(mob_tree, groups[key]["name"],
+                           (len(lst), sum(e["deaths"] for e in lst),
+                            f"{best:.1f}", f"{worst:.1f}"))
+            enc_ui["order"].append(key)
+
+    def _fmt_span(secs):
+        m, s = divmod(int(secs), 60)
+        return f"{m}:{s:02d}"
+
+    def on_mob_select(_e=None):
+        sel = mob_tree.selection()
+        if not sel:
+            return
+        idx = mob_tree.index(sel[0])
+        if not (0 <= idx < len(enc_ui["order"])):
+            return
+        key = enc_ui["order"][idx]
+        rows = sorted((e for e in ensure_encounters()
+                       if e["mob_key"] == key), key=lambda e: e["start"])
+        enc_ui["rows"] = rows
+        fight_tree.delete(*fight_tree.get_children())
+        best = max((e["dps"] for e in rows), default=0)
+        for i, e in enumerate(rows):
+            star = " ★" if e["dps"] == best and len(rows) > 1 else ""
+            striped_insert(
+                fight_tree, str(i + 1),
+                (e["when"], e["zone"] or "?", _fmt_span(e["span"]),
+                 f"{e['dps']:.1f}{star}", _fmt_num(e["dmg"]),
+                 _fmt_num(e["taken"]), e["deaths"], e["stance"]),
+                tags=("best",) if star else ())
+        if rows:
+            show_encounter(max(rows, key=lambda e: e["dps"]))
+
+    def _selected_encounters():
+        return [enc_ui["rows"][fight_tree.index(s)]
+                for s in fight_tree.selection()
+                if 0 <= fight_tree.index(s) < len(enc_ui["rows"])]
+
+    def _abil_lines(e, kind):
+        src_d = e[kind]
+        total = max(sum(v["total"] for v in src_d.values()), 1)
+        rows = sorted(src_d.items(), key=lambda kv: -kv[1]["total"])
+        out = []
+        for name, v in rows[:10]:
+            crit = f", {v['crits']} crit" if v.get("crits") else ""
+            out.append(f"  {name:<28} {_fmt_num(v['total']):>8}  "
+                       f"{v['total'] / total:>4.0%}  "
+                       f"({v['hits']} hits{crit}, big {_fmt_num(v['biggest'])})")
+        return out
+
+    def show_encounter(e):
+        enc_txt.config(state="normal")
+        enc_txt.delete("1.0", "end")
+        _enc_put(f"{e['mob']}", "h")
+        _enc_put(f"   {e['when']}  ·  session {e['session_i'] + 1}"
+                 + (f"  ·  {e['zone']}" if e["zone"] else "") + "\n", "dim")
+        _enc_put(f"length {_fmt_span(e['span'])} (active "
+                 f"{_fmt_span(e['active'])})   ")
+        _enc_put(f"DPS {e['dps']:.1f}", "b")
+        _enc_put(f"   DPM {_fmt_num(e['dps'] * 60)}   "
+                 f"DPH {_fmt_num(e['dps'] * 3600)}\n")
+        _enc_put(f"dealt {_fmt_num(e['dmg'])}   taken {_fmt_num(e['taken'])}"
+                 f"   healed {_fmt_num(e['healed'])}   acc {e['acc']}%   "
+                 f"crit {e['critpct']}%   big {_fmt_num(e['big'])}\n")
+        _enc_put(f"kills {e['kills']}   ")
+        _enc_put(f"deaths {e['deaths']}", "warn" if e["deaths"] else None)
+        _enc_put(f"   stance {e['stance']} / {e['invocation']}\n")
+        if e["resists"]:
+            _enc_put("resisted: " + ",  ".join(
+                f"{k} x{v}" for k, v in sorted(
+                    e["resists"].items(), key=lambda kv: -kv[1])) + "\n",
+                "warn")
+        if e["abilities"]:
+            _enc_put("\ndamage by ability:\n", "b")
+            _enc_put("\n".join(_abil_lines(e, "abilities")) + "\n")
+        if e["heals"]:
+            _enc_put("\nhealing:\n", "b")
+            _enc_put("\n".join(_abil_lines(e, "heals")) + "\n")
+        if e["casts"]:
+            _enc_put("\ncasts: " + ",  ".join(
+                f"{k} x{v}" for k, v in sorted(e["casts"].items())) + "\n",
+                "dim")
+        if len(e["mobs"]) > 1:
+            others = ",  ".join(f"{n} ({_fmt_num(di)} dmg to it)"
+                                for n, di, _do in e["mobs"][1:6])
+            _enc_put(f"\nalso in this fight: {others}\n", "dim")
+        enc_txt.config(state="disabled")
+
+    def show_compare(a, b):
+        # a = higher DPS of the two
+        if b["dps"] > a["dps"]:
+            a, b = b, a
+        enc_txt.config(state="normal")
+        enc_txt.delete("1.0", "end")
+        _enc_put(f"{a['mob']} — better vs worse attempt\n", "h")
+        _enc_put(f"{'':<20}{'BETTER':>14}{'WORSE':>14}\n", "dim")
+        rows = [
+            ("when", a["when"], b["when"]),
+            ("session", f"#{a['session_i'] + 1} {a['zone'] or ''}".strip(),
+             f"#{b['session_i'] + 1} {b['zone'] or ''}".strip()),
+            ("length", _fmt_span(a["span"]), _fmt_span(b["span"])),
+            ("DPS", f"{a['dps']:.1f}", f"{b['dps']:.1f}"),
+            ("DPM", _fmt_num(a["dps"] * 60), _fmt_num(b["dps"] * 60)),
+            ("DPH", _fmt_num(a["dps"] * 3600), _fmt_num(b["dps"] * 3600)),
+            ("damage dealt", _fmt_num(a["dmg"]), _fmt_num(b["dmg"])),
+            ("damage taken", _fmt_num(a["taken"]), _fmt_num(b["taken"])),
+            ("healed", _fmt_num(a["healed"]), _fmt_num(b["healed"])),
+            ("accuracy", f"{a['acc']}%", f"{b['acc']}%"),
+            ("crit", f"{a['critpct']}%", f"{b['critpct']}%"),
+            ("biggest hit", _fmt_num(a["big"]), _fmt_num(b["big"])),
+            ("resists", str(sum(a["resists"].values())),
+             str(sum(b["resists"].values()))),
+            ("deaths", str(a["deaths"]), str(b["deaths"])),
+            ("stance", a["stance"], b["stance"]),
+            ("invocation", a["invocation"], b["invocation"]),
+        ]
+        for label, va, vb in rows:
+            tag = "b" if label in ("DPS",) else None
+            _enc_put(f"{label:<20}", "dim")
+            _enc_put(f"{va:>14}", tag or ("good" if va != vb else None))
+            _enc_put(f"{vb:>14}\n", tag)
+        _enc_put("\nwhat changed (ranked by likely impact):\n", "h")
+        for i, text in enumerate(encounter_diff(a, b), 1):
+            _enc_put(f"  {i}. {text}\n",
+                     "good" if i <= 3 else None)
+        enc_txt.config(state="disabled")
+
+    def on_fight_select(_e=None):
+        sel = _selected_encounters()
+        if len(sel) == 1:
+            show_encounter(sel[0])
+        elif len(sel) == 2:
+            show_compare(sel[0], sel[1])
+
+    def compare_best_worst():
+        rows = enc_ui["rows"]
+        if len(rows) < 2:
+            return
+        show_compare(max(rows, key=lambda e: e["dps"]),
+                     min(rows, key=lambda e: e["dps"]))
+
+    def compare_selected():
+        sel = _selected_encounters()
+        if len(sel) == 2:
+            show_compare(sel[0], sel[1])
+
+    cmp_bw_btn.config(command=compare_best_worst)
+    cmp_sel_btn.config(command=compare_selected)
+    mob_tree.bind("<<TreeviewSelect>>", on_mob_select)
+    fight_tree.bind("<<TreeviewSelect>>", on_fight_select)
+    enc_search_var.trace_add("write", refresh_mob_tree)
+
+    def _on_tab_changed(_e=None):
+        try:
+            if nb.nametowidget(nb.select()) is enc_frame \
+               and state["encounters"] is None:
+                refresh_mob_tree()
+        except (KeyError, tk.TclError):
+            pass
+
+    nb.bind("<<NotebookTabChanged>>", _on_tab_changed)
 
     # ==========================================================================
     # Diagnostics tab -- passive healing estimates + unrecognized lines

@@ -83,6 +83,12 @@ so AFK time can't skew the percentages.
                    the FONTS and the layout together, for eyes that want
                    bigger text; independent of Size above
   * Opacity
+  * Fight summary popup -- when a Combat ends, a small draggable window
+                   pops up with that fight's numbers: who it was against,
+                   DPS/DPM/DPH, dealt/taken/healed, acc/crit/big,
+                   kills/deaths, stance, resists, and a FILTERABLE
+                   ability/heal/cast breakdown. Refreshes in place when
+                   the next fight ends; toggle it here.
   * Reset current fight
   * Open Session Report... (detailed breakdowns -- see eql_session_report.py)
   * Show unrecognized combat lines (calibration aid, see eql_combat_tracker.py)
@@ -418,6 +424,8 @@ def run_overlay(log_path):
         "show_buffs": True,
         # RESISTED block: per-fight tally of your spells a mob resisted
         "show_resisted": True,
+        # pop a small stats window when a fight ends (see fight popup)
+        "fight_popup": True,
         # Text size: 1.0 standard, 2.0 "Elder", 2.5 "Legend" -- scales the
         # FONTS (and the layout with them), independent of "scale" above
         # which shrinks the element footprint while keeping fonts fixed
@@ -516,6 +524,168 @@ def run_overlay(log_path):
 
     make_draggable(root, (bar, title_lbl), settings)
 
+    # -- post-fight summary popup ---------------------------------------------
+    # When a Combat ends, a small themed window pops up next to the meter
+    # with that fight's numbers: rates at all three timescales, ability
+    # breakdown (filterable), casts, resists, stance. Toggle via the
+    # right-click menu ("Fight summary popup"); drag it anywhere; it
+    # refreshes in place when the next fight ends. Seeding/backfill never
+    # pops it (only fights that end while the meter is LIVE).
+    fpop = {"top": None, "text": None, "filter_var": None, "fight": None,
+            "live": False}
+
+    def _fp_close():
+        if fpop["top"] is not None and fpop["top"].winfo_exists():
+            fpop["top"].withdraw()
+
+    def _fp_ensure():
+        if fpop["top"] is not None and fpop["top"].winfo_exists():
+            return
+        th = theme()
+        top = tk.Toplevel(root)
+        top.overrideredirect(True)
+        top.attributes("-topmost", True)
+        try:
+            top.attributes("-alpha", settings.get("opacity", 0.9))
+        except tk.TclError:
+            pass
+        top.configure(bg=th["panel"])
+        x = settings.get("fight_popup_x")
+        y = settings.get("fight_popup_y")
+        if x is None or y is None:
+            x = root.winfo_x() + root.winfo_width() + 8
+            y = root.winfo_y()
+        top.geometry(f"+{x}+{y}")
+
+        fbar = tk.Frame(top, bg=th["panel"], cursor="fleur")
+        fbar.pack(fill="x")
+        ftitle = tk.Label(fbar, text="  FIGHT SUMMARY", bg=th["panel"],
+                          fg=th["accent"], font=mono(9, "bold"), anchor="w")
+        ftitle.pack(side="left", pady=2)
+        fclose = tk.Label(fbar, text=" \u2715 ", bg=th["panel"],
+                          fg=th["dim"], font=mono(9, "bold"), cursor="hand2")
+        fclose.pack(side="right", padx=2)
+        fclose.bind("<Button-1>", lambda e: _fp_close())
+        fclose.bind("<Enter>", lambda e: fclose.config(fg=th["fg"]))
+        fclose.bind("<Leave>", lambda e: fclose.config(fg=th["dim"]))
+
+        frow = tk.Frame(top, bg=th["panel"])
+        frow.pack(fill="x", padx=6)
+        tk.Label(frow, text="filter:", bg=th["panel"], fg=th["dim"],
+                 font=mono(8)).pack(side="left")
+        fvar = tk.StringVar()
+        fentry = tk.Entry(frow, textvariable=fvar, width=18, relief="flat",
+                          bg=th["bg"], fg=th["fg"],
+                          insertbackground=th["fg"], font=mono(8))
+        fentry.pack(side="left", padx=(4, 0), ipady=1)
+        fvar.trace_add("write", lambda *_: _fp_fill())
+
+        txt = tk.Text(top, wrap="none", relief="flat", bg=th["panel"],
+                      fg=th["fg"], font=mono(8), width=52, height=18,
+                      state="disabled")
+        txt.pack(fill="both", expand=True, padx=6, pady=(2, 6))
+        txt.tag_configure("h", foreground=th["accent"],
+                          font=mono(9, "bold"))
+        txt.tag_configure("b", font=mono(8, "bold"))
+        txt.tag_configure("dim", foreground=th["dim"])
+        txt.tag_configure("warn", foreground=th["warn"])
+
+        drag = {"x": 0, "y": 0}
+
+        def press(e):
+            drag["x"] = e.x_root - top.winfo_x()
+            drag["y"] = e.y_root - top.winfo_y()
+
+        def motion(e):
+            settings["fight_popup_x"] = e.x_root - drag["x"]
+            settings["fight_popup_y"] = e.y_root - drag["y"]
+            top.geometry(f"+{settings['fight_popup_x']}"
+                         f"+{settings['fight_popup_y']}")
+
+        for wdg in (fbar, ftitle):
+            wdg.bind("<ButtonPress-1>", press)
+            wdg.bind("<B1-Motion>", motion)
+            wdg.bind("<ButtonRelease-1>", lambda e: settings.save())
+
+        fpop.update(top=top, text=txt, filter_var=fvar)
+
+    def _fp_fill():
+        fight = fpop["fight"]
+        txt = fpop["text"]
+        if fight is None or txt is None or not txt.winfo_exists():
+            return
+        th = theme()
+        flt = (fpop["filter_var"].get() or "").strip().lower()
+        you = fight.actors.get(YOU_LABEL) or {}
+        active = fight.elapsed()
+        dps = you.get("dmg_out", 0) / active
+        m, s = divmod(int(fight.span()), 60)
+        enemies = fight.enemies()
+        name = enemies[0][0] if enemies else "(no enemy?)"
+        extra = f"  (+{len(enemies) - 1} more)" if len(enemies) > 1 else ""
+        swings = you.get("hits", 0) + you.get("misses", 0)
+        acc = round(100 * you.get("hits", 0) / swings) if swings else 0
+        crit = round(100 * you.get("crits", 0) / you.get("hits", 1)) \
+            if you.get("hits") else 0
+
+        txt.config(state="normal")
+        txt.delete("1.0", "end")
+
+        def put(t, tag=None):
+            txt.insert("end", t, (tag,) if tag else ())
+
+        put(f"{name}{extra}\n", "h")
+        put(f"{m}:{s:02d} (active {active:.0f}s)   ")
+        put(f"DPS {dps:.1f}", "b")
+        put(f"  DPM {_fmt_num(dps * 60)}  DPH {_fmt_num(dps * 3600)}\n")
+        put(f"dealt {_fmt_num(you.get('dmg_out', 0))}  "
+            f"taken {_fmt_num(you.get('dmg_in', 0))}  "
+            f"healed {_fmt_num(you.get('heal_out', 0))}\n")
+        put(f"acc {acc}%  crit {crit}%  "
+            f"big {_fmt_num(you.get('biggest_hit', 0))}   "
+            f"kills {fight.kills}  ")
+        put(f"deaths {fight.deaths}\n", "warn" if fight.deaths else None)
+        put(f"{fight.stance or '?'} / {fight.invocation or '?'}\n", "dim")
+        if fight.spell_resists:
+            put("resisted: " + "  ".join(
+                f"{k} x{v}" for k, v in sorted(fight.spell_resists.items(),
+                                               key=lambda kv: -kv[1]))
+                + "\n", "warn")
+
+        def rows(dct, label):
+            items = [(n, v) for n, v in dct.items()
+                     if not flt or flt in n.lower()]
+            if not items:
+                return
+            total = max(sum(v["total"] for v in dct.values()), 1)
+            put(f"\n{label}\n", "b")
+            for n, v in sorted(items, key=lambda kv: -kv[1]["total"])[:12]:
+                put(f" {n[:24]:<24}{_fmt_num(v['total']):>8}"
+                    f"{v['total'] / total:>5.0%}  {v['hits']}h\n")
+
+        rows(fight.abilities_dmg, "damage")
+        rows(fight.abilities_heal, "healing")
+        casts = [(k, v) for k, v in sorted(fight.spell_casts.items())
+                 if not flt or flt in k.lower()]
+        if casts:
+            put("\ncasts: " + "  ".join(f"{k} x{v}" for k, v in casts)
+                + "\n", "dim")
+        txt.config(state="disabled")
+
+    def show_fight_popup(fight):
+        _fp_ensure()
+        fpop["fight"] = fight
+        _fp_fill()
+        fpop["top"].deiconify()
+        fpop["top"].lift()
+
+    def _on_fight_complete(fight):
+        # only fights that END while the meter runs live -- seeding and
+        # reseed backfills replay history and must never pop windows
+        if not settings.get("fight_popup", True) or not fpop["live"]:
+            return
+        root.after(0, lambda: show_fight_popup(fight))
+
     # -- tracker + watcher ---------------------------------------------------
     live = {}
 
@@ -572,6 +742,7 @@ def run_overlay(log_path):
         tracker = CombatTracker(
             self_name=char_name_from(path),
             idle_timeout=active_timeout())
+        tracker.fight_listeners.append(_on_fight_complete)
         watcher = LogWatcher(path)
         watcher.add_handler(tracker.handle_line)
         # long Combat windows (per-minute/hour modes, tri layout) seed
@@ -590,7 +761,14 @@ def run_overlay(log_path):
         settings["log_path"] = path
         settings.save()
 
-    open_log(log_path)
+    def open_log_and_arm(path):
+        fpop["live"] = False   # backfill replay must not pop summaries
+        try:
+            open_log(path)
+        finally:
+            fpop["live"] = True
+
+    open_log_and_arm(log_path)
 
     def reseed_for_timeout(old_timeout):
         """Called after a units/timeout/layout change. Moving to a LONGER
@@ -602,7 +780,7 @@ def run_overlay(log_path):
         if new > old_timeout + 0.5:
             path = settings.get("log_path")
             if path and os.path.isfile(path):
-                open_log(path)
+                open_log_and_arm(path)
                 anim.clear()
                 return
         live["tracker"].idle_timeout = new
@@ -1384,6 +1562,12 @@ def run_overlay(log_path):
         settings.save()
         _font_cache.clear()   # drop stale-size font objects
 
+    def set_fight_popup(v):
+        settings["fight_popup"] = v
+        settings.save()
+        if not v:
+            _fp_close()
+
     def set_show_buffs(v):
         settings["show_buffs"] = v
         settings.save()
@@ -1544,6 +1728,10 @@ def run_overlay(log_path):
         m.add_command(
             label=("● " if cur_r else "   ") + "Show resisted (per fight)",
             command=lambda: set_show_resisted(not cur_r))
+        cur_fp = settings.get("fight_popup", True)
+        m.add_command(
+            label=("● " if cur_fp else "   ") + "Fight summary popup",
+            command=lambda: set_fight_popup(not cur_fp))
         m.add_command(label="Reset current fight", command=reset_fight)
         _report_sibling = "eql_session_report.exe" if getattr(sys, "frozen", False) \
             else "eql_session_report.py"

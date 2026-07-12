@@ -547,6 +547,25 @@ class Fight:
         # spell -> times a mob resisted it DURING this fight (the meter's
         # RESISTED block; session-wide counts live on the tracker)
         self.spell_resists = {}
+        # per-fight detail for encounter analytics (the Session Report's
+        # Encounters tab and the meter's fight-summary popup): YOUR
+        # ability/heal breakdowns, casts, and kill/death counts scoped to
+        # THIS fight (session-wide equivalents live on the tracker)
+        self.abilities_dmg = {}
+        self.abilities_heal = {}
+        self.spell_casts = {}
+        self.kills = 0
+        self.deaths = 0
+
+    def enemies(self):
+        """(name, actor-dict) for every non-you/non-pet actor, biggest
+        involvement first -- the mobs this fight was against. "Spell" is
+        the placeholder source for unattributed incoming spell damage,
+        not a mob."""
+        out = [(n, a) for n, a in self.actors.items()
+               if n not in (YOU_LABEL, PET_LABEL, "Spell")]
+        out.sort(key=lambda kv: -(kv[1]["dmg_in"] + kv[1]["dmg_out"]))
+        return out
 
     def actor(self, name):
         return self.actors.setdefault(name, _blank_actor())
@@ -588,6 +607,9 @@ class CombatTracker:
         self.on_change = on_change
         self.idle_timeout = idle_timeout
         self.self_name = self_name
+        # called with each COMPLETED Fight (see _end_fight) -- encounter
+        # analytics hook for the Session Report and the meter's popup
+        self.fight_listeners = []
 
         # persistent across sessions: calibration aids only ------------------
         self.unmatched = deque(maxlen=MAX_UNMATCHED)
@@ -801,6 +823,13 @@ class CombatTracker:
             if you:
                 self.combat_dmg_out += you["dmg_out"]
                 self.combat_dmg_in += you["dmg_in"]
+            # encounter analytics: hand the completed fight to listeners
+            # (Session Report encounter collection, meter fight popup)
+            for fn in self.fight_listeners:
+                try:
+                    fn(self.current)
+                except Exception:
+                    pass
         self.current = None
 
     def avg_combat_dps(self):
@@ -902,28 +931,30 @@ class CombatTracker:
                 self.biggest_hit = max(self.biggest_hit, amount)
                 if crit:
                     self.crit_count += 1
-            ab = self.abilities_dmg.setdefault(ability or MELEE_ABILITY,
-                                               _blank_ability())
-            ab["total"] += amount
-            ab["hits"] += 1
-            ab["biggest"] = max(ab["biggest"], amount)
-            ab["category"] = category
-            if crit:
-                ab["crits"] += 1
-            if ability and category == "spell":
-                ab["proc"] = ability not in self.spell_casts \
-                    and ability.lower() in SPELL_DB.proc_names()
+            for dst in (self.abilities_dmg, self.current.abilities_dmg):
+                ab = dst.setdefault(ability or MELEE_ABILITY,
+                                    _blank_ability())
+                ab["total"] += amount
+                ab["hits"] += 1
+                ab["biggest"] = max(ab["biggest"], amount)
+                ab["category"] = category
+                if crit:
+                    ab["crits"] += 1
+                if ability and category == "spell":
+                    ab["proc"] = ability not in self.spell_casts \
+                        and ability.lower() in SPELL_DB.proc_names()
         elif src_label == PET_LABEL:
             self._push_recent("pet_out", wall_time, amount, category)
             self.pet_dmg_out += amount
-            ab = self.abilities_dmg.setdefault(
-                f"Pet: {ability or MELEE_ABILITY}", _blank_ability())
-            ab["total"] += amount
-            ab["hits"] += 1
-            ab["biggest"] = max(ab["biggest"], amount)
-            ab["category"] = "pet"
-            if crit:
-                ab["crits"] += 1
+            for dst in (self.abilities_dmg, self.current.abilities_dmg):
+                ab = dst.setdefault(
+                    f"Pet: {ability or MELEE_ABILITY}", _blank_ability())
+                ab["total"] += amount
+                ab["hits"] += 1
+                ab["biggest"] = max(ab["biggest"], amount)
+                ab["category"] = "pet"
+                if crit:
+                    ab["crits"] += 1
         elif tgt_label == YOU_LABEL:
             self._push_recent("dmg_in", wall_time, amount, category)
             setattr(self, f"{category}_dmg_in",
@@ -964,10 +995,14 @@ class CombatTracker:
         if src_label == YOU_LABEL:
             self._push_recent("heal_out", wall_time, amount)
             self.heal_out_total += amount
-            ab = self.abilities_heal.setdefault(ability or "Heal", _blank_ability())
-            ab["total"] += amount
-            ab["hits"] += 1
-            ab["biggest"] = max(ab["biggest"], amount)
+            dsts = [self.abilities_heal]
+            if in_combat:
+                dsts.append(self.current.abilities_heal)
+            for dst in dsts:
+                ab = dst.setdefault(ability or "Heal", _blank_ability())
+                ab["total"] += amount
+                ab["hits"] += 1
+                ab["biggest"] = max(ab["biggest"], amount)
         if tgt_label == YOU_LABEL:
             self.heal_in_total += amount
         self._notify()
@@ -1425,6 +1460,10 @@ class CombatTracker:
             self._pending_casts[who] = (spell, wall_time + CAST_WINDOW)
             if who == YOU_LABEL:
                 self.spell_casts[spell] = self.spell_casts.get(spell, 0) + 1
+                if self.current is not None and \
+                   wall_time - self._last_activity_wall <= self.idle_timeout:
+                    fc = self.current.spell_casts
+                    fc[spell] = fc.get(spell, 0) + 1
             return
 
         # cast outcomes: resists / fizzles / interrupts (EQL phrasings --
@@ -1608,6 +1647,8 @@ class CombatTracker:
         if m:
             if self._is_pet(self._n(m.group("source"))):
                 self.kills.append(wall_time)   # your pet's kill is your kill
+                if self.current is not None:
+                    self.current.kills += 1
                 self._notify()
             return
 
@@ -1684,6 +1725,8 @@ class CombatTracker:
             # the killing blow already landed via its own damage line; a
             # death never needs to spawn a Combat by itself
             self.deaths.append(wall_time)
+            if self.current is not None:
+                self.current.deaths += 1
             self._clear_all_buffs(wall_time)
             self._notify()
             return
@@ -1694,6 +1737,8 @@ class CombatTracker:
             # already landed via the hit lines that preceded this) -- just
             # log the timestamp for the kills/hour rate.
             self.kills.append(wall_time)
+            if self.current is not None:
+                self.current.kills += 1
             self._notify()
             return
 
