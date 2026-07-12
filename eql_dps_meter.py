@@ -78,6 +78,9 @@ so AFK time can't skew the percentages.
                    footprint (width, bars, spacing) while FONTS STAY THE
                    SAME; long texts abbreviate instead of shrinking, so the
                    data stays readable at every size
+  * Text size   -- Standard (100%) / Elder (200%) / Legend (250%): scales
+                   the FONTS and the layout together, for eyes that want
+                   bigger text; independent of Size above
   * Opacity
   * Reset current fight
   * Open Session Report... (detailed breakdowns -- see eql_session_report.py)
@@ -414,6 +417,10 @@ def run_overlay(log_path):
         "show_buffs": True,
         # RESISTED block: per-fight tally of your spells a mob resisted
         "show_resisted": True,
+        # Text size: 1.0 standard, 2.0 "Elder", 2.5 "Legend" -- scales the
+        # FONTS (and the layout with them), independent of "scale" above
+        # which shrinks the element footprint while keeping fonts fixed
+        "font_scale": 1.0,
         "scale": 1.0,   # element size; fonts stay constant (see SIZE_STEPS)
     })
 
@@ -480,12 +487,18 @@ def run_overlay(log_path):
 
     _font_cache = {}
 
+    def font_scale():
+        """Text-size multiplier (1.0 / 2.0 "Elder" / 2.5 "Legend"). Layout
+        metrics multiply by this too, so everything grows together."""
+        return float(settings.get("font_scale", 1.0))
+
     def mono(size, weight="normal"):
-        key = (settings["theme"], size, weight)
+        fs = font_scale()
+        key = (settings["theme"], size, weight, fs)
         f = _font_cache.get(key)
         if f is None:
             f = tkfont.Font(family=get_theme(settings["theme"])["font_mono"][0],
-                            size=size, weight=weight)
+                            size=int(round(size * fs)), weight=weight)
             _font_cache[key] = f
         return f
 
@@ -778,16 +791,17 @@ def run_overlay(log_path):
             a = get_anim(f"{prefix}_{sfx}")
             a["disp"] += (a["target"] - a["disp"]) * BAR_EASE
             parts.append((lbl, a["disp"]))
-        if w < 240:
+        if w < 240 * font_scale():
             short = {"melee": "m", "spell": "s", "song": "sg", "ds": "ds"}
             return "·".join(f"{short[l]} {fmt_rate(v)}" for l, v in parts)
         return " · ".join(f"{l} {fmt_rate(v)}" for l, v in parts)
 
     def draw_segment_row_vertical(y, w, th, label, dps_val, pct_txt, max_dps,
                                   color, amount_txt=None, rate_txt=None):
-        label_w = 40
+        fs = font_scale()
+        label_w = int(40 * fs)
         draw_text(8, y, anchor="w", text=label, fill=color, font=mono(8, "bold"))
-        track_x0, track_x1 = 8 + label_w, w - 46
+        track_x0, track_x1 = 8 + label_w, w - int(46 * fs)
         if th.get("text_only"):
             # Vintage theme: no bar -- rate (and damage, if the DMG
             # sources option adds it) as text, % in its usual spot
@@ -799,17 +813,20 @@ def run_overlay(log_path):
             return
         track_w = track_x1 - track_x0
         frac = 0 if max_dps <= 0 else max(0.0, min(1.0, dps_val / max_dps))
-        canvas.create_rectangle(track_x0, y - 5, track_x1, y + 5, outline=th["dim"])
+        bh = int(5 * fs)
+        canvas.create_rectangle(track_x0, y - bh, track_x1, y + bh,
+                                outline=th["dim"])
         fill_w = int(track_w * frac)
         if fill_w > 0:
-            canvas.create_rectangle(track_x0, y - 4, track_x0 + fill_w, y + 4,
+            canvas.create_rectangle(track_x0, y - bh + 1,
+                                    track_x0 + fill_w, y + bh - 1,
                                     fill=color, outline="")
         if amount_txt:
             # actual damage dealt. Wide fill: right-aligned INSIDE the bar,
             # auto-contrasted against the bar color (dark text on bright
             # bars). Narrow fill: just after it, over the empty track,
             # where the theme fg already contrasts the bg.
-            est_w = 7 * len(amount_txt)
+            est_w = int(7 * fs) * len(amount_txt)
             if fill_w > est_w + 10:
                 draw_text(track_x0 + fill_w - 4, y, anchor="e",
                                    text=amount_txt,
@@ -832,14 +849,15 @@ def run_overlay(log_path):
         # 60s as per-minute (/m), and the whole Combat per hour (/h).
         tri = settings.get("layout") == "tri"
         s = settings.get("scale", 1.0)
-        w = max(200 if tri else 160,
-                int((330 if tri else CANVAS_WIDTH_V) * s))
-        row_big = max(20, int(22 * s))
-        row_sub = max(11, int(13 * s))
-        row_seg = max(12, int(16 * s))
-        row_ft = max(13, int(17 * s))
-        row_pet = max(16, int(18 * s))
-        gap = max(11, int(14 * s))
+        fs = font_scale()   # text-size preset scales fonts AND layout
+        w = int(max(200 if tri else 160,
+                    (330 if tri else CANVAS_WIDTH_V) * s) * fs)
+        row_big = int(max(20, 22 * s) * fs)
+        row_sub = int(max(11, 13 * s) * fs)
+        row_seg = int(max(12, 16 * s) * fs)
+        row_ft = int(max(13, 17 * s) * fs)
+        row_pet = int(max(16, 18 * s) * fs)
+        gap = int(max(11, 14 * s) * fs)
         # PET DPS/DTPS rows appear only when this session has a pet
         has_pet = bool(tracker.pet_names) or \
             tracker.pet_dmg_out > 0 or tracker.pet_dmg_in > 0
@@ -852,7 +870,7 @@ def run_overlay(log_path):
             if settings.get("show_buffs", True) else []
         resist_rows = _resist_display_rows(fight, is_live) \
             if settings.get("show_resisted", True) else []
-        top_block = (14 + 3 * row_big) if tri \
+        top_block = (int(14 * fs) + 3 * row_big) if tri \
             else (3 * row_big + 2 * row_sub)
         h = (gap + top_block
              + (2 * row_pet if has_pet else 0) + gap + gap
@@ -879,11 +897,12 @@ def run_overlay(log_path):
             # split the width after the row label.
             for t3k, v in _tri_targets(tracker, vals, elapsed).items():
                 get_anim(t3k)["target"] = v
-            col_r = [46 + (w - 54) * (i + 1) // 3 for i in range(3)]
+            col_r = [int(46 * fs) + (w - int(54 * fs)) * (i + 1) // 3
+                     for i in range(3)]
             for i, hdr in enumerate(("now/s", "1m/m", "combat/h")):
                 draw_text(col_r[i], y, anchor="e", text=hdr,
                           fill=th["dim"], font=mono(7))
-            y += 14
+            y += int(14 * fs)
             for label, metric, color in (("DMG", "dps", th["accent"]),
                                          ("HEAL", "hps", th["fg"]),
                                          ("TAKEN", "tps", th["warn"])):
@@ -966,7 +985,7 @@ def run_overlay(log_path):
             draw_text(w // 2, y, text="— RESISTED —",
                       fill=th["warn"], font=mono(9, "bold"))
             y += gap
-            maxch = max(10, (w - 50) // 6)
+            maxch = max(10, int((w - 50 * fs) // (6 * fs)))
             for name, txt in resist_rows:
                 nm = name if len(name) <= maxch else name[:maxch - 1] + "…"
                 draw_text(8, y, anchor="w", text=nm, fill=th["fg"],
@@ -984,7 +1003,7 @@ def run_overlay(log_path):
             draw_text(w // 2, y, text="— BUFFS —",
                       fill=th["accent"], font=mono(9, "bold"))
             y += gap
-            maxch = max(10, (w - 70) // 6)
+            maxch = max(10, int((w - 70 * fs) // (6 * fs)))
             for label, txt in buff_rows:
                 name = label if len(label) <= maxch \
                     else label[:maxch - 1] + "…"
@@ -1000,7 +1019,7 @@ def run_overlay(log_path):
         # -- bottom section: centered strips, labels dim / values colored
         #    so the dense stat lines stay scannable --------------------------
         cx = w // 2
-        sep = " " if w < 240 else "   "
+        sep = " " if w < 240 * fs else "   "
         dim, fg, acc, warn = th["dim"], th["fg"], th["accent"], th["warn"]
         if is_live:
             draw_strip(y, w, [
@@ -1047,15 +1066,22 @@ def run_overlay(log_path):
 
     def render_horizontal(th, tracker, fight, is_live):
         # Element size: only the width scales (row heights are font-bound);
-        # texts tighten instead of shrinking so fonts stay the same.
+        # texts tighten instead of shrinking so fonts stay the same. The
+        # text-size preset (fs) scales the whole fixed-coordinate grid
+        # along with the fonts -- z() maps design coordinates to pixels.
         s = settings.get("scale", 1.0)
-        w = max(380, int(CANVAS_WIDTH_H * s))
+        fs = font_scale()
+
+        def z(v):
+            return int(v * fs)
+
+        w = int(max(380, CANVAS_WIDTH_H * s) * fs)
         buff_rows = _buff_display_rows(tracker) \
             if settings.get("show_buffs", True) else []
         resist_rows = _resist_display_rows(fight, is_live) \
             if settings.get("show_resisted", True) else []
-        h = CANVAS_HEIGHT_H + (14 if buff_rows else 0) \
-            + (14 if resist_rows else 0)
+        h = z(CANVAS_HEIGHT_H) + (z(14) if buff_rows else 0) \
+            + (z(14) if resist_rows else 0)
         canvas.configure(width=w, height=h)
         draw_background(w, h)
 
@@ -1079,19 +1105,19 @@ def run_overlay(log_path):
                 (lab_t, "tps", th["warn"], True))):
             a = get_anim(key)
             a["disp"] += (a["target"] - a["disp"]) * BAR_EASE
-            cx = 10 + i * col_w
-            draw_text(cx, 10, anchor="nw", text=label, fill=th["dim"],
+            cx = z(10) + i * col_w
+            draw_text(cx, z(10), anchor="nw", text=label, fill=th["dim"],
                                font=mono(9, "bold"))
             if has_split and is_live:
                 draw_text(
-                    cx + 44, 11, anchor="nw",
+                    cx + z(44), z(11), anchor="nw",
                     text=_split_text(key, vals, 0),   # always abbreviated
                     fill=th["dim"], font=mono(7))
-            draw_text(cx, 24, anchor="nw",
+            draw_text(cx, z(24), anchor="nw",
                                text=fmt_rate(a['disp']) if is_live else "--",
                                fill=color, font=mono(18, "bold"))
 
-        canvas.create_line(6, 56, w - 6, 56, fill=th["dim"])
+        canvas.create_line(6, z(56), w - 6, z(56), fill=th["dim"])
 
         # Row 2: Melee / Skill / Spell / Song / DS / Pet -- rate + % of total
         seg_colors = {lbl: th.get(SEG_COLOR_ROLE[lbl], th["fg"])
@@ -1102,8 +1128,8 @@ def run_overlay(log_path):
             amt = vals[key]
             seg_dps = amt / elapsed * unit_factor()
             pct = 0 if vals["dmg_all"] == 0 else round(100 * amt / vals["dmg_all"])
-            cx = 10 + i * col5
-            draw_text(cx, 62, anchor="nw", text=label,
+            cx = z(10) + i * col5
+            draw_text(cx, z(62), anchor="nw", text=label,
                                fill=seg_colors[label], font=mono(9, "bold"))
             if not is_live:
                 txt = "--"
@@ -1112,7 +1138,7 @@ def run_overlay(log_path):
                 txt = f"{_fmt_num(amt)} ({pct}%)"
             else:
                 txt = f"{fmt_rate(seg_dps)}{unit_sfx} ({pct}%)"
-            draw_text(cx, 76, anchor="nw", text=txt,
+            draw_text(cx, z(76), anchor="nw", text=txt,
                                fill=th["fg"], font=mono(9, "bold"))
 
         # Rows 3-6 are CENTERED strips with colored values (labels dim,
@@ -1120,7 +1146,7 @@ def run_overlay(log_path):
         # wall of text at this density.
         dim, fg, acc, warn = th["dim"], th["fg"], th["accent"], th["warn"]
         kph = tracker.kills_per_hour()
-        pad = "  " if w < 520 else "      "
+        pad = "  " if w < 520 * fs else "      "
 
         # Row 3: current-fight stats + pet + kills + stance/invocation
         if is_live:
@@ -1146,7 +1172,7 @@ def run_overlay(log_path):
                  (f" ({kph:.1f}/hr)", dim),
                  (pad, dim), (tracker.stance or "?", acc), (" / ", dim),
                  (tracker.invocation or "?", fg)]
-        draw_strip(103, w, segs)
+        draw_strip(z(103), w, segs)
 
         # Row 4: ALL TIME -- lifetime numbers for at-a-glance comparison
         at = live.get("alltime")
@@ -1162,7 +1188,7 @@ def run_overlay(log_path):
                     segs.append((pad, dim))
                     for n, p in pcts[:3]:
                         segs += [(_abbr(n), fg), (f" {p}% ", dim)]
-            draw_strip(118, w, segs)
+            draw_strip(z(118), w, segs)
 
         # Row 5: active buffs/debuffs on you, est. countdowns (see
         # _buff_display_rows for the time-text legend)
@@ -1171,11 +1197,11 @@ def run_overlay(log_path):
             for lbl, txt in buff_rows:
                 nm = lbl if len(lbl) <= 16 else lbl[:15] + "…"
                 segs += [(nm, fg), (f" {txt}  ", dim)]
-            draw_strip(133, w, segs)
+            draw_strip(z(133), w, segs)
 
         # Row 6: your spells a mob resisted THIS fight (clears with it)
         if resist_rows:
-            ry = 133 + (14 if buff_rows else 0)
+            ry = z(133) + (z(14) if buff_rows else 0)
             segs = [("RESISTED  ", warn)]
             for n, t in resist_rows:
                 nm = n if len(n) <= 20 else n[:19] + "…"
@@ -1265,6 +1291,11 @@ def run_overlay(log_path):
     def set_seg_amount(v):
         settings["seg_show_amount"] = v
         settings.save()
+
+    def set_font_scale(v):
+        settings["font_scale"] = v
+        settings.save()
+        _font_cache.clear()   # drop stale-size font objects
 
     def set_show_buffs(v):
         settings["show_buffs"] = v
@@ -1400,6 +1431,16 @@ def run_overlay(log_path):
             size_menu.add_command(label=f"{mark}{int(v*100)}%",
                                   command=lambda v=v: set_scale(v))
         m.add_cascade(label="Size", menu=size_menu)
+
+        text_menu = tk.Menu(m, tearoff=0)
+        cur_fs = settings.get("font_scale", 1.0)
+        for v, label in ((1.0, "Standard (100%)"),
+                         (2.0, "Elder (200%)"),
+                         (2.5, "Legend (250%)")):
+            mark = "● " if abs(cur_fs - v) < 0.01 else "   "
+            text_menu.add_command(label=mark + label,
+                                  command=lambda v=v: set_font_scale(v))
+        m.add_cascade(label="Text size", menu=text_menu)
 
         op = tk.Menu(m, tearoff=0)
         for v in (1.0, 0.9, 0.75, 0.6, 0.45):

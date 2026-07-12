@@ -1,3 +1,13 @@
+# EQL Log Reader — v1.5 (in progress)
+
+## What's new in v1.5
+
+**Text size presets: Elder and Legend.** For eyes that want bigger text: the Friends Overlay and the DPS/HPS Meter gain a right-click **Text size** menu — Standard (100%), **Elder (200%)**, and **Legend (250%)**. Fonts and layout scale together, independently of the existing Size (element footprint) setting, and the choice persists per overlay.
+
+**Fullscreen note removed.** The old "requires Windowed / Borderless-Windowed mode" caveat was wrong for EQL — the overlays draw fine over the game's fullscreen mode — and is gone from the README and docs.
+
+---
+
 # EQL Log Reader — v1.4
 
 **Release date:** July 12, 2026
@@ -244,8 +254,6 @@ MIT — see LICENSE.
 **Release date:** July 7, 2026
 
 First public release. EQL Log Reader is a family of always-on-top overlay tools for **EverQuest Legends**, driven entirely by the game's own log file. No injection, no memory reading, no game files touched — the tools just tail the log the game already writes, so they're safe to run alongside the game.
-
-Requires the game in Windowed or Borderless-Windowed mode (true exclusive fullscreen draws over everything, including overlays).
 
 ## What's included
 

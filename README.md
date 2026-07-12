@@ -9,9 +9,6 @@ game's own log file (`eqlog_<Name>_<Server>.txt`). No injection, no memory
 reading, no game files touched — the tools just tail the log the game already
 writes, so they're safe to run alongside the game.
 
-Requires the game to run in Windowed or Borderless-Windowed mode (true
-exclusive fullscreen draws over everything, including overlays).
-
 > **Windows SmartScreen note:** the installer is not yet code-signed, so
 > Windows may warn that it "isn't commonly downloaded" (browser) and show
 > "Publisher: Unknown" (installer). That's the standard warning for any

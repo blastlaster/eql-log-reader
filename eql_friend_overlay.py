@@ -39,8 +39,6 @@ list and the /who window render on canvases, so Neon HUD text carries the
 same black outline as the DPS meter and stays readable over bright footage.
 
 Notes:
-  * Requires the game to run in Windowed or Borderless-Windowed mode
-    (true exclusive fullscreen draws over everything, including overlays).
   * Extensible: LogWatcher dispatches every parsed line to registered
     handlers, so future trackers (XP trends, loot, etc.) can plug in.
 """
@@ -511,6 +509,10 @@ def run_overlay(log_path):
         # FONTS STAY THE SAME so the data stays readable. Text height sets
         # the floor, so most of the gain is in margins and row spacing.
         "scale": 1.0,
+        # text size: 1.0 standard, 2.0 "Elder", 2.5 "Legend" -- scales the
+        # FONTS themselves; the list layout follows font metrics, so rows
+        # and the /who window grow with them
+        "font_scale": 1.0,
         "theme": DEFAULT_FRIEND_THEME,   # any key of FRIEND_THEMES
     }
     try:
@@ -571,6 +573,19 @@ def run_overlay(log_path):
     name_font = tkfont.Font(family="Segoe UI", size=10, weight="bold")
     info_font = tkfont.Font(family="Segoe UI", size=8)
     dot_font = tkfont.Font(family="Segoe UI", size=9)
+
+    # text-size presets (Standard/Elder/Legend) scale the fonts; the list
+    # and /who window measure font metrics when drawing, so their layout
+    # follows automatically
+    _FONT_BASES = ((title_font, 10), (name_font, 10),
+                   (info_font, 8), (dot_font, 9))
+
+    def apply_font_scale():
+        fs = float(settings.get("font_scale", 1.0))
+        for f, base in _FONT_BASES:
+            f.configure(size=int(round(base * fs)))
+
+    apply_font_scale()
 
     # -- title bar (drag handle) ----------------------------------------------
     bar = tk.Frame(root, bg=PANEL, cursor="fleur")
@@ -905,6 +920,15 @@ def run_overlay(log_path):
         # rebuild the /who window with the new paddings next time it shows
         if who_win["top"] is not None and who_win["top"].winfo_exists():
             who_win["top"].destroy()
+
+    def set_font_scale(v):
+        settings["font_scale"] = v
+        save_settings()
+        apply_font_scale()
+        # the /who window sizes itself from font metrics at draw time --
+        # rebuild it so the next /who lays out at the new size
+        if who_win["top"] is not None and who_win["top"].winfo_exists():
+            who_win["top"].destroy()
         who_win.update(top=None, body=None, title=None)
         mark_dirty()
 
@@ -968,6 +992,16 @@ def run_overlay(log_path):
             size_menu.add_command(label=f"{mark}{int(v*100)}%",
                                   command=lambda v=v: set_scale(v))
         m.add_cascade(label="Size", menu=size_menu)
+
+        text_menu = tk.Menu(m, tearoff=0)
+        cur_fs = settings.get("font_scale", 1.0)
+        for v, label in ((1.0, "Standard (100%)"),
+                         (2.0, "Elder (200%)"),
+                         (2.5, "Legend (250%)")):
+            mark = "● " if abs(cur_fs - v) < 0.01 else "   "
+            text_menu.add_command(label=mark + label,
+                                  command=lambda v=v: set_font_scale(v))
+        m.add_cascade(label="Text size", menu=text_menu)
         m.add_separator()
         m.add_command(label="Quit", command=root.destroy)
         m.tk_popup(e.x_root, e.y_root)
