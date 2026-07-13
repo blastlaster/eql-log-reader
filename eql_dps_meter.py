@@ -533,10 +533,14 @@ def run_overlay(log_path):
     # the LATEST fight it advances automatically; while you're studying an
     # older one it stays put (>> gets you back). Right-click the popup for
     # its OWN theme (saved separately; defaults to matching the meter).
+    # The body renders on a CANVAS with the suite's outlined-text
+    # treatment, so transparent themes (Neon HUD) key out the background
+    # exactly like the meter and friends overlay -- the title/nav/filter
+    # bars keep their panel color as the drag handle, same convention.
     # Toggle via the meter menu ("Fight summary popup"); drag anywhere.
     # Seeding/backfill fills the fight LIST but never pops the window.
     FP_COLS = 54   # popup text width in characters (rows are built to fit)
-    fpop = {"top": None, "text": None, "filter_var": None, "counter": None,
+    fpop = {"top": None, "body": None, "filter_var": None, "counter": None,
             "fonts": None, "fights": [], "idx": -1, "live": False}
 
     def fp_theme():
@@ -560,7 +564,7 @@ def run_overlay(log_path):
         if top is not None and top.winfo_exists():
             visible = top.state() != "withdrawn"
             top.destroy()
-            fpop.update(top=None, text=None, filter_var=None, counter=None)
+            fpop.update(top=None, body=None, filter_var=None, counter=None)
             if visible and fpop["idx"] >= 0:
                 _fp_ensure()
                 _fp_fill()
@@ -598,7 +602,14 @@ def run_overlay(log_path):
             top.attributes("-alpha", settings.get("opacity", 0.9))
         except tk.TclError:
             pass
-        top.configure(bg=th["panel"])
+        top.configure(bg=th["bg"])
+        if th.get("transparent"):
+            # same chroma-key treatment as the meter / friends overlay:
+            # the bg color becomes see-through; panel-colored bars stay
+            try:
+                top.attributes("-transparentcolor", th["bg"])
+            except tk.TclError:
+                pass
         x = settings.get("fight_popup_x")
         y = settings.get("fight_popup_y")
         if x is None or y is None:
@@ -620,7 +631,7 @@ def run_overlay(log_path):
 
         # pagination row: << < [fight i/N - time] > >>
         nav = tk.Frame(top, bg=th["panel"])
-        nav.pack(fill="x", padx=6)
+        nav.pack(fill="x")
 
         def nav_btn(text, cmd, side):
             b = tk.Label(nav, text=text, bg=th["panel"], fg=th["dim"],
@@ -631,35 +642,29 @@ def run_overlay(log_path):
             b.bind("<Leave>", lambda e: b.config(fg=th["dim"]))
             return b
 
-        nav_btn(" « ", lambda: _fp_nav(0), "left")                # first
-        nav_btn(" ‹ ", lambda: _fp_nav(fpop["idx"] - 1), "left")  # prev
-        nav_btn(" » ", lambda: _fp_nav(len(fpop["fights"])), "right")  # newest
-        nav_btn(" › ", lambda: _fp_nav(fpop["idx"] + 1), "right")      # next
+        nav_btn(" « ", lambda: _fp_nav(0), "left")
+        nav_btn(" ‹ ", lambda: _fp_nav(fpop["idx"] - 1), "left")
+        nav_btn(" » ", lambda: _fp_nav(len(fpop["fights"])), "right")
+        nav_btn(" › ", lambda: _fp_nav(fpop["idx"] + 1), "right")
         counter = tk.Label(nav, text="", bg=th["panel"], fg=th["dim"],
                            font=fonts["f8"])
         counter.pack(side="left", expand=True)
 
         frow = tk.Frame(top, bg=th["panel"])
-        frow.pack(fill="x", padx=6)
-        tk.Label(frow, text="filter:", bg=th["panel"], fg=th["dim"],
+        frow.pack(fill="x")
+        tk.Label(frow, text=" filter:", bg=th["panel"], fg=th["dim"],
                  font=fonts["f8"]).pack(side="left")
         fvar = tk.StringVar()
         fentry = tk.Entry(frow, textvariable=fvar, width=18, relief="flat",
-                          bg=th["bg"], fg=th["fg"],
+                          bg=th["panel"], fg=th["fg"],
                           insertbackground=th["fg"], font=fonts["f8"])
         fentry.pack(side="left", padx=(4, 0), ipady=1)
         fvar.trace_add("write", lambda *_: _fp_fill())
 
-        # word-wrap so the prose lines (resisted/casts) fold instead of
-        # clipping; height re-fits to the content on every fill
-        txt = tk.Text(top, wrap="word", relief="flat", bg=th["panel"],
-                      fg=th["fg"], font=fonts["f8"], width=FP_COLS,
-                      height=12, state="disabled")
-        txt.pack(fill="both", expand=True, padx=6, pady=(2, 6))
-        txt.tag_configure("h", foreground=th["accent"], font=fonts["f9b"])
-        txt.tag_configure("b", font=fonts["f8b"])
-        txt.tag_configure("dim", foreground=th["dim"])
-        txt.tag_configure("warn", foreground=th["warn"])
+        # canvas body: outlined text keyed over the (possibly transparent)
+        # background, wrapped/paginated by _fp_fill
+        body = tk.Canvas(top, bg=th["bg"], highlightthickness=0)
+        body.pack(fill="both", expand=True, padx=6, pady=(2, 6))
 
         drag = {"x": 0, "y": 0}
 
@@ -677,17 +682,31 @@ def run_overlay(log_path):
             wdg.bind("<ButtonPress-1>", press)
             wdg.bind("<B1-Motion>", motion)
             wdg.bind("<ButtonRelease-1>", lambda e: settings.save())
-        for wdg in (fbar, ftitle, nav, counter, txt):
+        for wdg in (fbar, ftitle, nav, counter, body):
             wdg.bind("<Button-3>", _fp_menu)
 
-        fpop.update(top=top, text=txt, filter_var=fvar, counter=counter)
+        fpop.update(top=top, body=body, filter_var=fvar, counter=counter)
+
+    def _fp_text(cv, x, y, text, fill, font, th, anchor="nw"):
+        """Outlined text, same stroke trick as the meter's draw_text --
+        Neon HUD text stays readable over bright game footage."""
+        ol = th.get("outline")
+        if ol and text.strip():
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    if dx or dy:
+                        cv.create_text(x + dx, y + dy, text=text, fill=ol,
+                                       font=font, anchor=anchor)
+        cv.create_text(x, y, text=text, fill=fill, font=font, anchor=anchor)
 
     def _fp_fill():
         fights = fpop["fights"]
-        txt = fpop["text"]
-        if not fights or fpop["idx"] < 0 or txt is None \
-           or not txt.winfo_exists():
+        body = fpop["body"]
+        if not fights or fpop["idx"] < 0 or body is None \
+           or not body.winfo_exists():
             return
+        th = fp_theme()
+        fonts = fpop["fonts"]
         fpop["idx"] = min(fpop["idx"], len(fights) - 1)
         fight = fights[fpop["idx"]]
         flt = (fpop["filter_var"].get() or "").strip().lower()
@@ -706,29 +725,40 @@ def run_overlay(log_path):
         crit = round(100 * you.get("crits", 0) / you.get("hits", 1)) \
             if you.get("hits") else 0
 
-        txt.config(state="normal")
-        txt.delete("1.0", "end")
+        # build LINES of (text, style) segments; prose lines wrap at
+        # FP_COLS so nothing ever clips
+        styles = {"h": (th["accent"], fonts["f9b"]),
+                  "b": (th["fg"], fonts["f8b"]),
+                  "dim": (th["dim"], fonts["f8"]),
+                  "warn": (th["warn"], fonts["f8"]),
+                  None: (th["fg"], fonts["f8"])}
+        L = []
 
-        def put(t, tag=None):
-            txt.insert("end", t, (tag,) if tag else ())
+        def line(*segs):
+            L.append(list(segs))
 
-        put(f"{name}{extra}\n", "h")
-        put(f"{m}:{s:02d} (active {active:.0f}s)   ")
-        put(f"DPS {dps:.1f}", "b")
-        put(f"  DPM {_fmt_num(dps * 60)}  DPH {_fmt_num(dps * 3600)}\n")
-        put(f"dealt {_fmt_num(you.get('dmg_out', 0))}  "
-            f"taken {_fmt_num(you.get('dmg_in', 0))}  "
-            f"healed {_fmt_num(you.get('heal_out', 0))}\n")
-        put(f"acc {acc}%  crit {crit}%  "
-            f"big {_fmt_num(you.get('biggest_hit', 0))}   "
-            f"kills {fight.kills}  ")
-        put(f"deaths {fight.deaths}\n", "warn" if fight.deaths else None)
-        put(f"{fight.stance or '?'} / {fight.invocation or '?'}\n", "dim")
+        def prose(text, style):
+            import textwrap
+            for chunk in textwrap.wrap(text, FP_COLS) or [text]:
+                line((chunk, style))
+
+        line((f"{name}{extra}", "h"))
+        line((f"{m}:{s:02d} (active {active:.0f}s)   ", None),
+             (f"DPS {dps:.1f}", "b"),
+             (f"  DPM {_fmt_num(dps * 60)}  DPH {_fmt_num(dps * 3600)}", None))
+        line((f"dealt {_fmt_num(you.get('dmg_out', 0))}  "
+              f"taken {_fmt_num(you.get('dmg_in', 0))}  "
+              f"healed {_fmt_num(you.get('heal_out', 0))}", None))
+        line((f"acc {acc}%  crit {crit}%  "
+              f"big {_fmt_num(you.get('biggest_hit', 0))}   "
+              f"kills {fight.kills}  ", None),
+             (f"deaths {fight.deaths}", "warn" if fight.deaths else None))
+        line((f"{fight.stance or '?'} / {fight.invocation or '?'}", "dim"))
         if fight.spell_resists:
-            put("resisted: " + "  ".join(
+            prose("resisted: " + "  ".join(
                 f"{k} x{v}" for k, v in sorted(fight.spell_resists.items(),
-                                               key=lambda kv: -kv[1]))
-                + "\n", "warn")
+                                               key=lambda kv: -kv[1])),
+                "warn")
 
         def rows(dct, label):
             items = [(n, v) for n, v in dct.items()
@@ -736,25 +766,35 @@ def run_overlay(log_path):
             if not items:
                 return
             total = max(sum(v["total"] for v in dct.values()), 1)
-            put(f"\n{label}\n", "b")
+            line(("", None))
+            line((label, "b"))
             for n, v in sorted(items, key=lambda kv: -kv[1]["total"])[:12]:
-                put(f" {n[:34]:<34}{_fmt_num(v['total']):>8}"
-                    f"{v['total'] / total:>5.0%}  {v['hits']}h\n")
+                line((f" {n[:34]:<34}{_fmt_num(v['total']):>8}"
+                      f"{v['total'] / total:>5.0%}  {v['hits']}h", None))
 
         rows(fight.abilities_dmg, "damage")
         rows(fight.abilities_heal, "healing")
         casts = [(k, v) for k, v in sorted(fight.spell_casts.items())
                  if not flt or flt in k.lower()]
         if casts:
-            put("\ncasts: " + "  ".join(f"{k} x{v}" for k, v in casts)
-                + "\n", "dim")
-        # re-fit the box to the content: logical lines plus word-wrap
-        # spillover, so NOTHING is ever cut off (within a sane cap)
-        content = txt.get("1.0", "end-1c")
-        n_lines = sum(max(1, -(-len(ln) // FP_COLS))
-                      for ln in content.split("\n"))
-        txt.config(height=min(max(n_lines + 1, 8), 40))
-        txt.config(state="disabled")
+            line(("", None))
+            prose("casts: " + "  ".join(f"{k} x{v}" for k, v in casts),
+                  "dim")
+
+        # render: fixed-advance x per segment, line height from the font
+        body.delete("all")
+        line_h = fonts["f9b"].metrics("linespace") + 1
+        w = fonts["f8"].measure("0" * FP_COLS) + 8
+        y = 3
+        for segs in L:
+            x = 2
+            for text, style in segs:
+                fill, font = styles[style]
+                if text:
+                    _fp_text(body, x, y, text, fill, font, th)
+                    x += font.measure(text)
+            y += line_h
+        body.configure(width=w, height=min(y + 4, line_h * 41))
 
     def _on_fight_complete(fight):
         # ALWAYS collect (pagination reaches back through the seeded
