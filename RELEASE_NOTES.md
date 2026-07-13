@@ -1,4 +1,8 @@
-# EQL Log Reader — v1.5 (in progress)
+# EQL Log Reader — v1.5
+
+**Release date:** July 12, 2026
+
+Encounter analytics release: the Session Report learns who you actually fight — a per-mob fight history across every session in the log with best-vs-worst comparison and a ranked "what changed" analysis — plus a post-fight summary popup on the meter. Charm pets finally count as your pet (and register themselves when you send them to attack), the meter gains All-timescales layouts in both orientations, the horizontal layout stops clipping, and new Elder/Legend text-size presets double or 2.5× the overlay fonts for eyes that want bigger text.
 
 ## What's new in v1.5
 
