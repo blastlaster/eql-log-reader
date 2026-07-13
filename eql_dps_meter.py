@@ -527,22 +527,70 @@ def run_overlay(log_path):
     # -- post-fight summary popup ---------------------------------------------
     # When a Combat ends, a small themed window pops up next to the meter
     # with that fight's numbers: rates at all three timescales, ability
-    # breakdown (filterable), casts, resists, stance. Toggle via the
-    # right-click menu ("Fight summary popup"); drag it anywhere; it
-    # refreshes in place when the next fight ends. Seeding/backfill never
-    # pops it (only fights that end while the meter is LIVE).
+    # breakdown (filterable), casts, resists, stance. PAGINATED across the
+    # session's fights: < > step one fight, << jumps to the session's first
+    # fight, >> to the newest. When a new fight ends while you're viewing
+    # the LATEST fight it advances automatically; while you're studying an
+    # older one it stays put (>> gets you back). Right-click the popup for
+    # its OWN theme (saved separately; defaults to matching the meter).
+    # Toggle via the meter menu ("Fight summary popup"); drag anywhere.
+    # Seeding/backfill fills the fight LIST but never pops the window.
     FP_COLS = 54   # popup text width in characters (rows are built to fit)
-    fpop = {"top": None, "text": None, "filter_var": None, "fight": None,
-            "live": False}
+    fpop = {"top": None, "text": None, "filter_var": None, "counter": None,
+            "fonts": None, "fights": [], "idx": -1, "live": False}
+
+    def fp_theme():
+        return get_theme(settings.get("fight_popup_theme")
+                         or settings["theme"])
 
     def _fp_close():
         if fpop["top"] is not None and fpop["top"].winfo_exists():
             fpop["top"].withdraw()
 
+    def _fp_nav(i):
+        if not fpop["fights"]:
+            return
+        fpop["idx"] = max(0, min(i, len(fpop["fights"]) - 1))
+        _fp_fill()
+
+    def set_fp_theme(key):
+        settings["fight_popup_theme"] = key or ""
+        settings.save()
+        top = fpop["top"]
+        if top is not None and top.winfo_exists():
+            visible = top.state() != "withdrawn"
+            top.destroy()
+            fpop.update(top=None, text=None, filter_var=None, counter=None)
+            if visible and fpop["idx"] >= 0:
+                _fp_ensure()
+                _fp_fill()
+                fpop["top"].deiconify()
+
+    def _fp_menu(e):
+        m = tk.Menu(fpop["top"], tearoff=0)
+        thm = tk.Menu(m, tearoff=0)
+        cur = settings.get("fight_popup_theme") or ""
+        thm.add_command(label=("● " if not cur else "   ")
+                        + "Match meter theme",
+                        command=lambda: set_fp_theme(None))
+        for key, spec in RETRO_THEMES.items():
+            thm.add_command(label=("● " if cur == key else "   ")
+                            + spec["label"],
+                            command=lambda k=key: set_fp_theme(k))
+        m.add_cascade(label="Theme", menu=thm)
+        m.add_command(label="Close", command=_fp_close)
+        m.tk_popup(e.x_root, e.y_root)
+
     def _fp_ensure():
         if fpop["top"] is not None and fpop["top"].winfo_exists():
             return
-        th = theme()
+        th = fp_theme()
+        fam = th["font_mono"][0]
+        fonts = {"f8": tkfont.Font(family=fam, size=8),
+                 "f8b": tkfont.Font(family=fam, size=8, weight="bold"),
+                 "f9b": tkfont.Font(family=fam, size=9, weight="bold"),
+                 "f10b": tkfont.Font(family=fam, size=10, weight="bold")}
+        fpop["fonts"] = fonts
         top = tk.Toplevel(root)
         top.overrideredirect(True)
         top.attributes("-topmost", True)
@@ -561,35 +609,55 @@ def run_overlay(log_path):
         fbar = tk.Frame(top, bg=th["panel"], cursor="fleur")
         fbar.pack(fill="x")
         ftitle = tk.Label(fbar, text="  FIGHT SUMMARY", bg=th["panel"],
-                          fg=th["accent"], font=mono(9, "bold"), anchor="w")
+                          fg=th["accent"], font=fonts["f9b"], anchor="w")
         ftitle.pack(side="left", pady=2)
-        fclose = tk.Label(fbar, text=" \u2715 ", bg=th["panel"],
-                          fg=th["dim"], font=mono(9, "bold"), cursor="hand2")
+        fclose = tk.Label(fbar, text=" ✕ ", bg=th["panel"],
+                          fg=th["dim"], font=fonts["f9b"], cursor="hand2")
         fclose.pack(side="right", padx=2)
         fclose.bind("<Button-1>", lambda e: _fp_close())
         fclose.bind("<Enter>", lambda e: fclose.config(fg=th["fg"]))
         fclose.bind("<Leave>", lambda e: fclose.config(fg=th["dim"]))
 
+        # pagination row: << < [fight i/N - time] > >>
+        nav = tk.Frame(top, bg=th["panel"])
+        nav.pack(fill="x", padx=6)
+
+        def nav_btn(text, cmd, side):
+            b = tk.Label(nav, text=text, bg=th["panel"], fg=th["dim"],
+                         font=fonts["f10b"], cursor="hand2")
+            b.pack(side=side, padx=1)
+            b.bind("<Button-1>", lambda e: cmd())
+            b.bind("<Enter>", lambda e: b.config(fg=th["accent"]))
+            b.bind("<Leave>", lambda e: b.config(fg=th["dim"]))
+            return b
+
+        nav_btn(" « ", lambda: _fp_nav(0), "left")                # first
+        nav_btn(" ‹ ", lambda: _fp_nav(fpop["idx"] - 1), "left")  # prev
+        nav_btn(" » ", lambda: _fp_nav(len(fpop["fights"])), "right")  # newest
+        nav_btn(" › ", lambda: _fp_nav(fpop["idx"] + 1), "right")      # next
+        counter = tk.Label(nav, text="", bg=th["panel"], fg=th["dim"],
+                           font=fonts["f8"])
+        counter.pack(side="left", expand=True)
+
         frow = tk.Frame(top, bg=th["panel"])
         frow.pack(fill="x", padx=6)
         tk.Label(frow, text="filter:", bg=th["panel"], fg=th["dim"],
-                 font=mono(8)).pack(side="left")
+                 font=fonts["f8"]).pack(side="left")
         fvar = tk.StringVar()
         fentry = tk.Entry(frow, textvariable=fvar, width=18, relief="flat",
                           bg=th["bg"], fg=th["fg"],
-                          insertbackground=th["fg"], font=mono(8))
+                          insertbackground=th["fg"], font=fonts["f8"])
         fentry.pack(side="left", padx=(4, 0), ipady=1)
         fvar.trace_add("write", lambda *_: _fp_fill())
 
         # word-wrap so the prose lines (resisted/casts) fold instead of
         # clipping; height re-fits to the content on every fill
         txt = tk.Text(top, wrap="word", relief="flat", bg=th["panel"],
-                      fg=th["fg"], font=mono(8), width=FP_COLS, height=12,
-                      state="disabled")
+                      fg=th["fg"], font=fonts["f8"], width=FP_COLS,
+                      height=12, state="disabled")
         txt.pack(fill="both", expand=True, padx=6, pady=(2, 6))
-        txt.tag_configure("h", foreground=th["accent"],
-                          font=mono(9, "bold"))
-        txt.tag_configure("b", font=mono(8, "bold"))
+        txt.tag_configure("h", foreground=th["accent"], font=fonts["f9b"])
+        txt.tag_configure("b", font=fonts["f8b"])
         txt.tag_configure("dim", foreground=th["dim"])
         txt.tag_configure("warn", foreground=th["warn"])
 
@@ -609,16 +677,23 @@ def run_overlay(log_path):
             wdg.bind("<ButtonPress-1>", press)
             wdg.bind("<B1-Motion>", motion)
             wdg.bind("<ButtonRelease-1>", lambda e: settings.save())
+        for wdg in (fbar, ftitle, nav, counter, txt):
+            wdg.bind("<Button-3>", _fp_menu)
 
-        fpop.update(top=top, text=txt, filter_var=fvar)
+        fpop.update(top=top, text=txt, filter_var=fvar, counter=counter)
 
     def _fp_fill():
-        fight = fpop["fight"]
+        fights = fpop["fights"]
         txt = fpop["text"]
-        if fight is None or txt is None or not txt.winfo_exists():
+        if not fights or fpop["idx"] < 0 or txt is None \
+           or not txt.winfo_exists():
             return
-        th = theme()
+        fpop["idx"] = min(fpop["idx"], len(fights) - 1)
+        fight = fights[fpop["idx"]]
         flt = (fpop["filter_var"].get() or "").strip().lower()
+        started = time.strftime("%H:%M:%S", time.localtime(fight.start_wall))
+        fpop["counter"].config(
+            text=f"fight {fpop['idx'] + 1} of {len(fights)} · {started}")
         you = fight.actors.get(YOU_LABEL) or {}
         active = fight.elapsed()
         dps = you.get("dmg_out", 0) / active
@@ -681,19 +756,27 @@ def run_overlay(log_path):
         txt.config(height=min(max(n_lines + 1, 8), 40))
         txt.config(state="disabled")
 
-    def show_fight_popup(fight):
-        _fp_ensure()
-        fpop["fight"] = fight
-        _fp_fill()
-        fpop["top"].deiconify()
-        fpop["top"].lift()
-
     def _on_fight_complete(fight):
-        # only fights that END while the meter runs live -- seeding and
-        # reseed backfills replay history and must never pop windows
+        # ALWAYS collect (pagination reaches back through the seeded
+        # session); only auto-show/advance for fights that end live
+        fights = fpop["fights"]
+        was_on_last = fpop["idx"] == -1 or fpop["idx"] >= len(fights) - 1
+        fights.append(fight)
         if not settings.get("fight_popup", True) or not fpop["live"]:
             return
-        root.after(0, lambda: show_fight_popup(fight))
+        if was_on_last:
+            # viewing the latest (or nothing yet) -> follow the new fight
+            def show():
+                _fp_ensure()
+                fpop["idx"] = len(fpop["fights"]) - 1
+                _fp_fill()
+                fpop["top"].deiconify()
+                fpop["top"].lift()
+            root.after(0, show)
+        else:
+            # studying an older fight -> stay put; just refresh the
+            # counter so "of N" grows (>> jumps to the new one)
+            root.after(0, _fp_fill)
 
     # -- tracker + watcher ---------------------------------------------------
     live = {}
@@ -772,6 +855,8 @@ def run_overlay(log_path):
 
     def open_log_and_arm(path):
         fpop["live"] = False   # backfill replay must not pop summaries
+        fpop["fights"].clear()   # pagination restarts with the new window
+        fpop["idx"] = -1
         try:
             open_log(path)
         finally:
