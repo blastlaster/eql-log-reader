@@ -96,12 +96,17 @@ so AFK time can't skew the percentages.
 Damage source breakdown & pet
 --------------------------------
 Below the main DPS/HPS/DTPS numbers, the meter shows damage output split
-six ways -- Melee, Skill (Kick/Bash/...), Spell (casts, procs, weapon
-poisons), Song (Bard songs), DS (your damage shield burning attackers),
-and Pet -- each with its own DPS and share of the combined (you + pet)
-output this fight. DPS and DTPS also show a small "melee · spell
-(· song · ds)" split of your own numbers; song and ds only appear when
-they've contributed this fight.
+up to eight ways -- Melee, Skill (Kick/Bash/...), Ranged (bow "shoot"
+hits + thrown weapons), Spell (casts and procs), Poison (applied weapon
+poisons -- rogue vials), Song (Bard songs), DS (your damage shield
+burning attackers), and Pet -- each with its own DPS and share of the
+combined (you + pet) output this fight. Rows follow your BUILD: Melee
+always shows, everything else appears once that source has damage in
+the current fight, this session, or this build's all-time file (plus
+rows the /who class combination implies -- a bard always gets Song, a
+rogue Poison/Ranged). DPS and DTPS also show a small "melee · spell
+(· rng · psn · song · ds)" split of your own numbers; the optional terms
+only appear when they've contributed this fight.
 
 If you have a pet, PET DPS and PET DTPS appear as their own rows, separate
 from your numbers (your DPS is yours alone). All pet damage types count --
@@ -143,7 +148,7 @@ from eql_overlay_common import (
     POLL_INTERVAL_MS, SEED_BYTES, luma as _luma,
 )
 from eql_combat_tracker import (CombatTracker, YOU_LABEL, PET_LABEL,
-                                TS_ONLY_RE, LOG_TS_FMT)
+                                TS_ONLY_RE, LOG_TS_FMT, CATEGORIES)
 from eql_spell_db import SPELL_DB
 
 RENDER_INTERVAL_MS = 90      # animation frame rate (independent of log polling)
@@ -166,16 +171,30 @@ ERROR_LOG = data_path("eql_errors.log", APP_DIR)
 
 # Damage-source segment display order/colors are keyed to theme roles shared
 # with the main DPS/HPS/DTPS readout (accent/fg/warn/bad/dim) to keep the
-# palette small and consistent.
+# palette small and consistent; Ranged/Poison blend two roles (see
+# _seg_colors) since the compact themes only define six.
 SEGMENTS = (("Melee", "melee_dmg_out"), ("Skill", "skill_dmg_out"),
-            ("Spell", "spell_dmg_out"), ("Song", "song_dmg_out"),
+            ("Ranged", "ranged_dmg_out"), ("Spell", "spell_dmg_out"),
+            ("Poison", "poison_dmg_out"), ("Song", "song_dmg_out"),
             ("DS", "ds_dmg_out"), ("Pet", "pet_dmg_out"))
 SEG_COLOR_ROLE = {"Melee": "accent", "Skill": "fg", "Spell": "warn",
                   "Song": "bad", "DS": "alt", "Pet": "dim"}
-# category groups for the melee/spell/song/ds sub-readouts under DPS and
-# DTPS (song and ds only appear when they have damage this fight)
+SEG_CAT = {"Melee": "melee", "Skill": "skill", "Ranged": "ranged",
+           "Spell": "spell", "Poison": "poison", "Song": "song",
+           "DS": "ds", "Pet": "pet"}
+# Damage sources a class combination implies even before any damage has
+# been seen for it (from the /who class mnemonics) -- a fresh bard sees
+# the Song row at 0% instead of it popping in mid-fight. Everything else
+# is data-driven: a source row shows once damage for it exists in the
+# current fight, the session, or this build's all-time file.
+CLASS_HINT_SOURCES = {"BRD": ("Song",), "ROG": ("Poison", "Ranged"),
+                      "RNG": ("Ranged",)}
+# category groups for the melee/rng/spell/psn/song/ds sub-readouts under
+# DPS and DTPS (all but melee/spell only appear once they have damage)
 MELEE_CATS = ("melee", "skill")
+RANGED_CATS = ("ranged",)
 SPELL_CATS = ("spell",)
+POISON_CATS = ("poison",)
 SONG_CATS = ("song",)
 DS_CATS = ("ds",)
 
@@ -208,16 +227,38 @@ class AllTimeStore:
 
     COUNTERS = ("hits", "misses", "crits", "kills", "deaths")
 
-    def __init__(self, log_path):
+    def __init__(self, log_path, classes=None):
         base = os.path.splitext(os.path.basename(log_path))[0]
         if base.startswith("eqlog_"):
             base = base[len("eqlog_"):]
-        self.path = data_path(f"eql_alltime_{base}.json", APP_DIR)
+        # per-BUILD files: once /who has revealed the class combination,
+        # lifetime stats live in eql_alltime_<char>_<server>__<CLASSES>.json
+        # -- change class and the meter saves this build's file and loads
+        # the other's, so builds never mix. Until the combo is known (no
+        # /who seen yet) the legacy un-suffixed file is used.
+        self.classes = classes or None
+        suffix = f"__{classes.replace('/', '-')}" if classes else ""
+        self.path = data_path(f"eql_alltime_{base}{suffix}.json", APP_DIR)
         self.data = {"hits": 0, "misses": 0, "crits": 0, "kills": 0,
                      "deaths": 0, "biggest": 0, "combat_secs": 0.0,
-                     "stance_secs": {}, "invocation_secs": {}}
+                     "stance_secs": {}, "invocation_secs": {},
+                     # lifetime damage per source category for THIS build
+                     # -- drives which DMG SOURCES rows the meter shows
+                     "source_dmg": {}}
+        load_path = self.path
+        if classes and not os.path.isfile(self.path):
+            # first time this build is seen: if no per-build file exists
+            # yet for this character, adopt the legacy (pre-build-split)
+            # file as its starting point -- that history was almost
+            # certainly earned on the main build
+            import glob
+            legacy = data_path(f"eql_alltime_{base}.json", APP_DIR)
+            others = glob.glob(
+                data_path(f"eql_alltime_{base}__*.json", APP_DIR))
+            if not others and os.path.isfile(legacy):
+                load_path = legacy
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
+            with open(load_path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
             for k in self.data:
                 if k in loaded and type(loaded[k]) is type(self.data[k]):
@@ -231,9 +272,12 @@ class AllTimeStore:
 
     @staticmethod
     def _totals(tracker):
-        return {"hits": tracker.swings_hit, "misses": tracker.swings_missed,
-                "crits": tracker.crit_count, "kills": len(tracker.kills),
-                "deaths": len(tracker.deaths)}
+        t = {"hits": tracker.swings_hit, "misses": tracker.swings_missed,
+             "crits": tracker.crit_count, "kills": len(tracker.kills),
+             "deaths": len(tracker.deaths)}
+        for c in CATEGORIES:
+            t[f"src_{c}"] = getattr(tracker, f"{c}_dmg_out")
+        return t
 
     def snapshot_baseline(self, tracker):
         """Call right after LogWatcher.seed(): whatever the tracker counted
@@ -247,13 +291,19 @@ class AllTimeStore:
         totals = self._totals(tracker)
         if self._baseline is None:
             self._baseline = totals
-        if any(totals[k] < self._baseline[k] for k in self.COUNTERS):
+        if any(totals[k] < self._baseline.get(k, 0) for k in totals):
             # session reset (login banner) -- counters restarted from zero
-            self._baseline = {k: 0 for k in self.COUNTERS}
+            self._baseline = {k: 0 for k in totals}
         for k in self.COUNTERS:
             d = totals[k] - self._baseline[k]
             if d > 0:
                 self.data[k] += d
+                self._dirty = True
+        for c in CATEGORIES:
+            d = totals[f"src_{c}"] - self._baseline.get(f"src_{c}", 0)
+            if d > 0:
+                sd = self.data["source_dmg"]
+                sd[c] = sd.get(c, 0) + d
                 self._dirty = True
         self._baseline = totals
         if tracker.biggest_hit > self.data["biggest"]:
@@ -291,6 +341,10 @@ class AllTimeStore:
         return round(100 * self.data["crits"] / self.data["hits"]) \
             if self.data["hits"] else 0
 
+    def source_dmg(self, cat):
+        """Lifetime damage recorded for a source category on this build."""
+        return self.data.get("source_dmg", {}).get(cat, 0)
+
     def time_pcts(self, key):
         """[(name, pct)] sorted descending, for "stance_secs" /
         "invocation_secs"."""
@@ -320,15 +374,21 @@ def _fmt_countdown(secs):
     return f"{secs}s"
 
 
-def _buff_display_rows(tracker, max_rows=6):
-    """(label, time-text) for the buffs/debuffs currently active on YOU
+LOG_STALE_SECS = 120   # no log line for this long -> the game (or its
+                       # logging) is off; buff clocks freeze at the last
+                       # line instead of ticking on wall time
+
+
+def _buff_display_rows(tracker, max_rows=None):
+    """(label, time-text) for ALL buffs/debuffs currently active on YOU
     (tracked from the spell file's cast-on-you/fade messages), soonest to
-    expire first. The countdown is an ESTIMATE from the spell's own
-    duration formula (see eql_spell_db.duration_seconds caveats), scaled
-    by YOUR level when the log has revealed it (/who or a level-up line;
-    L50 assumed until then). Buffs someone ELSE cast on you scale by the
-    CASTER's level, which the log never shows -- those estimates read
-    long/short by the level difference:
+    expire first; `max_rows` optionally truncates. The countdown is an
+    ESTIMATE from the spell's own duration formula (see
+    eql_spell_db.duration_seconds caveats), scaled by YOUR level when the
+    log has revealed it (/who or a level-up line; L50 assumed until
+    then). Buffs someone ELSE cast on you scale by the CASTER's level,
+    which the log never shows -- those estimates read long/short by the
+    level difference:
       3:42  -- estimated time left
       ?     -- past its estimated end but no fade message seen yet
       perm  -- permanent until removed
@@ -337,8 +397,16 @@ def _buff_display_rows(tracker, max_rows=6):
     A quoted-message label (spell ambiguous) still gets a real countdown
     when every candidate spell shares one duration estimate -- whole spell
     lines share a message AND a duration formula, so which spell it is
-    doesn't change when it ends."""
+    doesn't change when it ends.
+
+    The clock: wall time while the log is alive, but FROZEN just past the
+    newest log line once the log goes stale -- a meter tailing a dead log
+    (game closed, or relaunched over an old tail) must not keep counting
+    buffs up on wall time."""
     now = time.time()
+    last = tracker._last_line_wall or now
+    if now - last > LOG_STALE_SECS:
+        now = last + LOG_STALE_SECS
     lvl = tracker.player_level or 50
     rows = []
     for label, start in tracker.active_buffs.items():
@@ -362,7 +430,8 @@ def _buff_display_rows(tracker, max_rows=6):
             rows.append((float("inf"), label,
                          "+" + _fmt_countdown(now - start)))
     rows.sort(key=lambda r: (r[0], r[1]))
-    return [(lbl, txt) for _, lbl, txt in rows[:max_rows]]
+    out = [(lbl, txt) for _, lbl, txt in rows]
+    return out[:max_rows] if max_rows else out
 
 
 def _resist_display_rows(fight, is_live, max_rows=4):
@@ -394,6 +463,43 @@ def _mix(c1, c2, t):
     r, g, b = (round(r1 + (r2 - r1) * t), round(g1 + (g2 - g1) * t),
               round(b1 + (b2 - b1) * t))
     return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _seg_colors(th):
+    """Per-source colors for the DMG SOURCES rows. Six sources map onto
+    the theme's six roles; Ranged and Poison (added later) blend two
+    roles each so every theme keeps eight distinguishable colors without
+    growing its palette."""
+    c = {lbl: th.get(SEG_COLOR_ROLE.get(lbl, ""), th["fg"])
+         for lbl, _ in SEGMENTS}
+    c["Ranged"] = _mix(th["accent"], th["warn"], 0.5)
+    c["Poison"] = _mix(th.get("alt", th["fg"]), th.get("bad", th["warn"]), 0.5)
+    return c
+
+
+def _visible_segments(tracker, vals, alltime):
+    """The DMG SOURCES rows worth showing for this character's current
+    BUILD: Melee always; every other source once it has damage in the
+    current fight, this session, or this build's all-time file -- plus
+    sources the /who class combination implies (CLASS_HINT_SOURCES) and
+    the Pet row whenever a pet is registered. A build that can't (or just
+    doesn't) use a source never wastes a row on it."""
+    hinted = set()
+    for c in (tracker.player_classes or "").split("/"):
+        hinted.update(CLASS_HINT_SOURCES.get(c, ()))
+    out = []
+    for label, key in SEGMENTS:
+        if label == "Melee":
+            out.append((label, key))
+            continue
+        seen = (vals.get(key, 0) > 0 or getattr(tracker, key, 0) > 0
+                or (alltime is not None
+                    and alltime.source_dmg(SEG_CAT[label]) > 0))
+        if label == "Pet":
+            seen = seen or bool(tracker.pet_names) or tracker.pet_dmg_in > 0
+        if seen or label in hinted:
+            out.append((label, key))
+    return out
 
 
 def run_overlay(log_path):
@@ -1016,12 +1122,15 @@ def run_overlay(log_path):
         t = active_timeout()
         watcher.seed(max_bytes=max(SEED_BYTES, _bytes_for_window(path, t))
                      if t > 90 else SEED_BYTES)
-        alltime = AllTimeStore(path)
+        # per-BUILD lifetime stats: the seeded tail may already contain a
+        # /who revealing the class combination -- open that build's file
+        alltime = AllTimeStore(path, tracker.player_classes)
         # everything counted so far came from the seeded log tail -- already
         # observed in a previous run, must not be double-counted
         alltime.snapshot_baseline(tracker)
         live["tracker"], live["watcher"] = tracker, watcher
         live["alltime"] = alltime
+        live["classes"] = tracker.player_classes
         live["char"] = char_name_from(path)
         settings["log_path"] = path
         settings.save()
@@ -1058,6 +1167,27 @@ def run_overlay(log_path):
 
     def get_anim(name):
         return anim.setdefault(name, {"disp": 0.0, "target": 0.0})
+
+    # BUFFS scrolling (vertical layout): the section shows a 6-row window
+    # into the full active-buff list; the mouse wheel over the section
+    # moves it. `region` is the section's y-extent on the canvas, refreshed
+    # every frame (None while the horizontal layout, which wraps ALL rows
+    # into its strip, is active).
+    buff_view = {"offset": 0, "count": 0, "rows": 6, "region": None}
+
+    def _on_buff_wheel(e):
+        reg = buff_view["region"]
+        if not reg or buff_view["count"] <= buff_view["rows"]:
+            return
+        if reg[0] <= e.y <= reg[1]:
+            up = getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0
+            buff_view["offset"] = max(0, min(
+                buff_view["offset"] + (-1 if up else 1),
+                buff_view["count"] - buff_view["rows"]))
+
+    canvas.bind("<MouseWheel>", _on_buff_wheel)
+    canvas.bind("<Button-4>", _on_buff_wheel)   # X11 wheel-up
+    canvas.bind("<Button-5>", _on_buff_wheel)   # X11 wheel-down
 
     # -- rendering -------------------------------------------------------------
     def theme():
@@ -1129,9 +1259,11 @@ def run_overlay(log_path):
         }
         for label, key in SEGMENTS:
             vals[key] = you[key] if you else 0
-        # melee/spell/song/ds splits for the sub-readouts (pet excluded --
-        # it has its own PET DPS/DTPS rows and DMG SOURCES row)
-        for suffix, cats in (("m", MELEE_CATS), ("s", SPELL_CATS),
+        # melee/ranged/spell/poison/song/ds splits for the sub-readouts
+        # (pet excluded -- it has its own PET DPS/DTPS rows and DMG
+        # SOURCES row)
+        for suffix, cats in (("m", MELEE_CATS), ("r", RANGED_CATS),
+                             ("s", SPELL_CATS), ("p", POISON_CATS),
                              ("g", SONG_CATS), ("d", DS_CATS)):
             vals[f"dmg_{suffix}"] = \
                 sum(you[f"{c}_dmg_out"] for c in cats) if you else 0
@@ -1160,16 +1292,11 @@ def run_overlay(log_path):
             rates = {"dps": vals["dmg"] / elapsed,
                      "hps": vals["heal"] / elapsed,
                      "tps": vals["taken"] / elapsed,
-                     "dps_m": vals["dmg_m"] / elapsed,
-                     "dps_s": vals["dmg_s"] / elapsed,
-                     "dps_g": vals["dmg_g"] / elapsed,
-                     "dps_d": vals["dmg_d"] / elapsed,
-                     "tps_m": vals["taken_m"] / elapsed,
-                     "tps_s": vals["taken_s"] / elapsed,
-                     "tps_g": vals["taken_g"] / elapsed,
-                     "tps_d": vals["taken_d"] / elapsed,
                      "pet_dps": vals["pet_dmg"] / elapsed,
                      "pet_tps": vals["pet_taken"] / elapsed}
+            for sfx in ("m", "r", "s", "p", "g", "d"):
+                rates[f"dps_{sfx}"] = vals[f"dmg_{sfx}"] / elapsed
+                rates[f"tps_{sfx}"] = vals[f"taken_{sfx}"] / elapsed
         else:
             window = 10.0 if mode == "rolling10" else 30.0
             eff = max(1.0, min(window, elapsed))
@@ -1177,16 +1304,13 @@ def run_overlay(log_path):
             rates = {"dps": rs("dmg_out", window) / eff,
                      "hps": rs("heal_out", window) / eff,
                      "tps": rs("dmg_in", window) / eff,
-                     "dps_m": rs("dmg_out", window, cats=MELEE_CATS) / eff,
-                     "dps_s": rs("dmg_out", window, cats=SPELL_CATS) / eff,
-                     "dps_g": rs("dmg_out", window, cats=SONG_CATS) / eff,
-                     "dps_d": rs("dmg_out", window, cats=DS_CATS) / eff,
-                     "tps_m": rs("dmg_in", window, cats=MELEE_CATS) / eff,
-                     "tps_s": rs("dmg_in", window, cats=SPELL_CATS) / eff,
-                     "tps_g": rs("dmg_in", window, cats=SONG_CATS) / eff,
-                     "tps_d": rs("dmg_in", window, cats=DS_CATS) / eff,
                      "pet_dps": rs("pet_out", window) / eff,
                      "pet_tps": rs("pet_in", window) / eff}
+            for sfx, cats in (("m", MELEE_CATS), ("r", RANGED_CATS),
+                              ("s", SPELL_CATS), ("p", POISON_CATS),
+                              ("g", SONG_CATS), ("d", DS_CATS)):
+                rates[f"dps_{sfx}"] = rs("dmg_out", window, cats=cats) / eff
+                rates[f"tps_{sfx}"] = rs("dmg_in", window, cats=cats) / eff
         f = unit_factor()
         if f != 1.0:
             rates = {k: v * f for k, v in rates.items()}
@@ -1220,9 +1344,11 @@ def run_overlay(log_path):
             draw_text(x, y, anchor="w", text=t, fill=c, font=f)
             x += f.measure(t)
 
-    # (term label, rate-key suffix, always shown?) -- song and ds only
-    # appear once they've contributed this fight, keeping the line short
-    SPLIT_TERMS = (("melee", "m", True), ("spell", "s", True),
+    # (term label, rate-key suffix, always shown?) -- ranged/poison/song/
+    # ds only appear once they've contributed this fight, keeping the
+    # line short
+    SPLIT_TERMS = (("melee", "m", True), ("rng", "r", False),
+                   ("spell", "s", True), ("psn", "p", False),
                    ("song", "g", False), ("ds", "d", False))
 
     def _split_text(prefix, vals, w):
@@ -1239,7 +1365,8 @@ def run_overlay(log_path):
             a["disp"] += (a["target"] - a["disp"]) * BAR_EASE
             parts.append((lbl, a["disp"]))
         if w < 240 * font_scale():
-            short = {"melee": "m", "spell": "s", "song": "sg", "ds": "ds"}
+            short = {"melee": "m", "rng": "r", "spell": "s", "psn": "p",
+                     "song": "sg", "ds": "ds"}
             return "·".join(f"{short[l]} {fmt_rate(v)}" for l, v in parts)
         return " · ".join(f"{l} {fmt_rate(v)}" for l, v in parts)
 
@@ -1313,25 +1440,36 @@ def run_overlay(log_path):
         if at:   # header + stats + kills, then stance/invoc lines if any
             at_lines = 3 + (1 if at.time_pcts("stance_secs") else 0) \
                          + (1 if at.time_pcts("invocation_secs") else 0)
-        buff_rows = _buff_display_rows(tracker) \
+
+        # is_live means "in Combat right now" -- when idle, everything
+        # combat-scoped renders as "--" (session stats below still show)
+        elapsed = fight.elapsed() if (is_live and fight) else 0.001
+        vals = _live_values(fight if is_live else None, elapsed)
+        segs = _visible_segments(tracker, vals, at)
+
+        # BUFFS: all active rows, scrolled to a 6-row window (mouse wheel
+        # over the section; the header shows "↕ 3-8/12" when there's more)
+        all_buffs = _buff_display_rows(tracker) \
             if settings.get("show_buffs", True) else []
+        n_buffs = len(all_buffs)
+        maxr = buff_view["rows"]
+        buff_view["count"] = n_buffs
+        off = buff_view["offset"] = \
+            max(0, min(buff_view["offset"], max(0, n_buffs - maxr)))
+        buff_rows = all_buffs[off:off + maxr]
+
         resist_rows = _resist_display_rows(fight, is_live) \
             if settings.get("show_resisted", True) else []
         top_block = (int(14 * fs) + 3 * row_big) if tri \
             else (3 * row_big + 2 * row_sub)
         h = (gap + top_block
              + (2 * row_pet if has_pet else 0) + gap + gap
-             + len(SEGMENTS) * row_seg + 4
+             + len(segs) * row_seg + 4
              + ((2 * gap + len(resist_rows) * row_ft + 4) if resist_rows else 0)
              + ((2 * gap + len(buff_rows) * row_ft + 4) if buff_rows else 0)
              + gap + (3 + at_lines) * row_ft + 4)
         canvas.configure(width=w, height=h)
         draw_background(w, h)
-
-        # is_live means "in Combat right now" -- when idle, everything
-        # combat-scoped renders as "--" (session stats below still show)
-        elapsed = fight.elapsed() if (is_live and fight) else 0.001
-        vals = _live_values(fight if is_live else None, elapsed)
 
         rates = _rate_targets(tracker, fight, is_live, vals, elapsed)
         for k, v in rates.items():
@@ -1405,12 +1543,11 @@ def run_overlay(log_path):
         draw_text(w // 2, y, text="— DMG SOURCES —",
                            fill=th["accent"], font=mono(9, "bold"))
         y += gap
-        seg_colors = {lbl: th.get(SEG_COLOR_ROLE[lbl], th["fg"])
-                      for lbl, _ in SEGMENTS}
-        seg_dps = {label: vals[key] / elapsed for label, key in SEGMENTS}
+        seg_colors = _seg_colors(th)
+        seg_dps = {label: vals[key] / elapsed for label, key in segs}
         max_seg_dps = max(seg_dps.values()) if seg_dps else 0
         show_amt = settings.get("seg_show_amount", False)
-        for label, key in SEGMENTS:
+        for label, key in segs:
             amt = vals[key]
             pct = 0 if vals["dmg_all"] == 0 else round(100 * amt / vals["dmg_all"])
             rate_txt = (fmt_rate(seg_dps[label] * unit_factor())
@@ -1445,10 +1582,18 @@ def run_overlay(log_path):
         # -- active buffs/debuffs on you, est. countdowns (see
         #    _buff_display_rows for the time-text legend) --------------------
         if buff_rows:
+            y_buffs0 = y
             canvas.create_line(8, y, w - 8, y, fill=th["dim"])
             y += gap
             draw_text(w // 2, y, text="— BUFFS —",
                       fill=th["accent"], font=mono(9, "bold"))
+            if n_buffs > maxr:
+                # more rows than fit -- show the window and invite the
+                # wheel; scrolling happens in _on_buff_wheel
+                draw_text(w - 8, y, anchor="e",
+                          text=f"↕{off + 1}-{off + len(buff_rows)}"
+                               f"/{n_buffs}",
+                          fill=th["dim"], font=mono(7))
             y += gap
             maxch = max(10, int((w - 70 * fs) // (6 * fs)))
             for label, txt in buff_rows:
@@ -1460,6 +1605,7 @@ def run_overlay(log_path):
                           font=mono(8))
                 y += row_ft
             y += 4
+            buff_view["region"] = (y_buffs0, y)
 
         canvas.create_line(8, y, w - 8, y, fill=th["dim"])
         y += gap
@@ -1712,12 +1858,13 @@ def run_overlay(log_path):
 
         canvas.create_line(6, z(56), w - 6, z(56), fill=th["dim"])
 
-        # Row 2: Melee / Skill / Spell / Song / DS / Pet -- rate + % of total
-        seg_colors = {lbl: th.get(SEG_COLOR_ROLE[lbl], th["fg"])
-                      for lbl, _ in SEGMENTS}
-        col5 = w // len(SEGMENTS)
+        # Row 2: the build's damage sources (see _visible_segments) --
+        # rate + % of total
+        seg_colors = _seg_colors(th)
+        segs_v = _visible_segments(tracker, vals, at)
+        col5 = w // max(len(segs_v), 1)
         show_amt = settings.get("seg_show_amount", False)
-        for i, (label, key) in enumerate(SEGMENTS):
+        for i, (label, key) in enumerate(segs_v):
             amt = vals[key]
             seg_dps = amt / elapsed * unit_factor()
             pct = 0 if vals["dmg_all"] == 0 else round(100 * amt / vals["dmg_all"])
@@ -1759,6 +1906,7 @@ def run_overlay(log_path):
         prev_state["live"] = in_combat
 
         canvas.delete("all")
+        buff_view["region"] = None   # render_vertical re-sets it each frame
         if settings.get("layout", "vertical") in ("horizontal", "tri_h"):
             render_horizontal(th, tracker, fight, in_combat)
         else:
@@ -1790,7 +1938,22 @@ def run_overlay(log_path):
         try:
             live["watcher"].poll()
             tracker = live["tracker"]
-            live["alltime"].tick(tracker, tracker.current is not None)
+            in_combat = tracker.current is not None
+            if tracker.player_classes != live.get("classes"):
+                # /who revealed a (different) class combination -- bank
+                # what accrued so far under the old build's file, then
+                # swap in this build's lifetime data. Damage sources and
+                # all-time numbers now follow the build.
+                old = live.get("alltime")
+                if old:
+                    old.tick(tracker, in_combat)
+                    old.save()
+                store = AllTimeStore(live["watcher"].path,
+                                     tracker.player_classes)
+                store.snapshot_baseline(tracker)
+                live["alltime"] = store
+                live["classes"] = tracker.player_classes
+            live["alltime"].tick(tracker, in_combat)
         finally:
             root.after(POLL_INTERVAL_MS, poll)
 

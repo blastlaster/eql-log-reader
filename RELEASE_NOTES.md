@@ -1,3 +1,23 @@
+# EQL Log Reader — v1.7
+
+**Release date:** July 21, 2026
+
+A whole new tool: the **Atlas Collector** — a cartography companion that turns your log into a living loot-and-spawn database, drawn on real zone maps. Kill, loot, and die anywhere and the Atlas remembers what, who, and exactly where.
+
+## What's new in v1.7
+
+**Atlas Collector (new tool).** Tails the log for kills, drops, corpse coin, and deaths — EQL's auto-loot lines name the mob, so every drop attributes exactly — and persists a per-character database. First launch imports your entire existing log history in seconds; restarts only catch up, never double-count. Observed drop rates sharpen with every kill.
+
+**Pre-discovered baseline.** Ships with a distilled copy of the public Project Quarm database (same EQMacEmu lineage as EQL, same item IDs): expected drop percentages, named spawn points, respawn timers, zone connections. Your play corroborates or contradicts it — and anything the baseline doesn't know (EQL's custom named, new items) is flagged **★NEW**: your discoveries. Later-era content stays hidden until you enable it (right-click → Expansions).
+
+**Map window.** Brewall-compatible zone maps (drop his pack into `mapsrewall\`) with pan/zoom, your live position + heading + trail, loot/kill/coin/death marks where they happened, named-spawn pins with hover cards (level, respawn, drops + rates — "MAY BE UP" when a named you've killed has had time to respawn), notes, a per-story **floor filter** that follows your own elevation, **auto-follow**, **ghost mode** (chroma-key: only the drawing floats over the game), lockable size, and a full **3D view** — the map files carry true elevation the in-game map can't show; tilt and orbit the dungeon with right-drag.
+
+**Search + commands.** A search bar with live autofill (items and mobs, yours + baseline) and scrolling grouped results; double-click anything to `find` it — orange rings mark every spot it's dropped for you. A private in-game chat channel accepts the same commands mid-fight: `find`, `guide <item>` (routes you zone-by-zone across a hand-curated classic zone graph, then follows the map geometry to the exact spot), `clear`, `note <text>` (pins at your `/loc`), `fav`. Channel safety is strict: only your own messages parse, and commands lock unless the channel has exactly one member. Full setup guide in the README.
+
+**Launcher.** Atlas Collector appears as the fifth tool row and restarts automatically on character switch, like the other live overlays.
+
+---
+
 # EQL Log Reader — v1.6
 
 **Release date:** July 13, 2026

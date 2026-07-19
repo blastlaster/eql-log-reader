@@ -2,8 +2,8 @@
 # ============================================================
 #  EQL Log Reader -- eql_suite.spec
 # ============================================================
-#  Custom PyInstaller spec that builds all four tools as ONE
-#  onedir bundle: a single shared "_internal" folder plus four
+#  Custom PyInstaller spec that builds all five tools as ONE
+#  onedir bundle: a single shared "_internal" folder plus five
 #  sibling .exe files sitting directly in dist\EQL Log Reader\ --
 #  the flat layout eql_launcher.py already expects (see its
 #  `frozen` / APP_DIR checks, and how it launches sibling tools
@@ -30,7 +30,14 @@ import os
 
 ICON = "icon.ico" if os.path.exists("icon.ico") else None
 
-TOOLS = ["eql_launcher", "eql_friend_overlay", "eql_dps_meter", "eql_session_report"]
+TOOLS = ["eql_launcher", "eql_friend_overlay", "eql_dps_meter",
+         "eql_session_report", "eql_atlas"]
+
+# The Atlas ships its optional "pre-discovered" baseline (distilled Project
+# Quarm database -- see eql_atlas_baseline_build.py) as a data file. It lands
+# in _internal, which eql_atlas.py checks via sys._MEIPASS.
+ATLAS_DATAS = ([("eql_atlas_baseline.json.gz", ".")]
+               if os.path.exists("eql_atlas_baseline.json.gz") else [])
 
 analyses = []
 for tool in TOOLS:
@@ -38,7 +45,7 @@ for tool in TOOLS:
         [f"{tool}.py"],
         pathex=[],
         binaries=[],
-        datas=[],
+        datas=ATLAS_DATAS if tool == "eql_atlas" else [],
         hiddenimports=[],
         hookspath=[],
         hooksconfig={},

@@ -15,9 +15,9 @@ both to keep the meter personal and so nearby fights can't stretch your
 fight window. Produces both:
 
   * live per-fight stats (for the retro DPS/HPS meter overlay)
-  * session-wide totals (for the session report): damage split six ways
-    (Melee / Skill / Spell / Song / Damage Shield / Pet), heal totals,
-    kill rate, and a
+  * session-wide totals (for the session report): damage split eight ways
+    (Melee / Skill / Ranged / Spell / Poison / Song / Damage Shield /
+    Pet), heal totals, kill rate, and a
     per-ability breakdown showing which spell, skill, or plain melee is
     contributing the most damage/healing.
 
@@ -145,10 +145,16 @@ ZONE_RE = re.compile(TS_RE + r"LOADING, PLEASE WAIT\.\.\.\s*$")
 
 # spell housekeeping -- confirmed formats; matched-and-ignored because spell
 # NAMES ("Spell: Flowering Heal") contain combat keywords and would land in
-# the calibration list otherwise
+# the calibration list otherwise. The discipline lines (learning/being
+# granted/activating rogue poisons etc. -- confirmed in a real rogue log)
+# are here for the same reason: "discipline" is itself a calibration
+# keyword.
 SPELL_HOUSEKEEPING_RE = re.compile(
     TS_RE + r"(?:You purchased \d|Beginning to (?:scribe|memorize) "
-            r"|You have finished (?:scribing|memorizing) )")
+            r"|You have finished (?:scribing|memorizing) "
+            r"|You have been granted the following discipline: "
+            r"|You have learned "
+            r"|You activate )")
 
 # Data model (per the user's spec):
 #   SESSION -- starts at "Welcome to EverQuest Legends!" (login). ALL
@@ -175,6 +181,12 @@ CRIT_WINDOW = 2.0           # seconds a "critical hit" announcement stays live
                             # (log timestamps only have 1s resolution, so this
                             # needs slack wider than wall-clock would)
 CAST_WINDOW = 4.0           # seconds a "begins casting" stays attributable
+SONG_FALLBACK_SECS = 600    # worst-case lifetime for a SONG whose duration
+                            # the spell file can't supply -- songs are short
+                            # by nature (a few ticks past the last note), so
+                            # even an unknown one must not outlive this; keeps
+                            # unresolvable song entries from sticking on the
+                            # BUFFS list forever
 
 MELEE_VERBS = {
     "hit", "hits", "slash", "slashes", "pierce", "pierces", "crush", "crushes",
@@ -182,7 +194,6 @@ MELEE_VERBS = {
     "gore", "gores", "maul", "mauls", "rend", "rends", "smash", "smashes",
     "strike", "strikes", "slice", "slices", "gouge", "gouges", "burn", "burns",
     "cleave", "cleaves",   # confirmed in a real log (sand giant)
-    "shoot", "shoots",     # confirmed in a real log (archery, 780 hits)
     "smite", "smites",     # confirmed in a real log (179 hits)
     "reave", "reaves",     # confirmed in a real log (21 hits)
 }
@@ -190,7 +201,13 @@ SKILL_VERBS = {
     "kick", "kicks", "bash", "bashes", "backstab", "backstabs",
     "frenzy", "frenzies", "slam", "slams",
 }
-ATTACK_VERBS = MELEE_VERBS | SKILL_VERBS
+# Ranged (bow) hits use "shoot" -- confirmed in a real log (archery, 780
+# hits). Caveat: some bows log their damage with the generic weapon-type
+# verb instead (pierce/slash/crush, indistinguishable from melee); those
+# still land in Melee -- only lines the log itself marks as ranged (the
+# shoot verb, and the thrown-weapon lines below) can be split out.
+RANGED_VERBS = {"shoot", "shoots"}
+ATTACK_VERBS = MELEE_VERBS | SKILL_VERBS | RANGED_VERBS
 
 SKILL_VERB_NAMES = {
     "kick": "Kick", "kicks": "Kick",
@@ -201,15 +218,21 @@ SKILL_VERB_NAMES = {
 }
 
 MELEE_ABILITY = "Melee"
-CATEGORY_LABELS = {"melee": "Melee", "skill": "Skill", "spell": "Spell",
-                   "song": "Song", "ds": "Dmg Shield", "pet": "Pet"}
-CATEGORIES = ("melee", "skill", "spell", "song", "ds", "pet")
+RANGED_ABILITY = "Archery"
+CATEGORY_LABELS = {"melee": "Melee", "skill": "Skill", "ranged": "Ranged",
+                   "spell": "Spell", "poison": "Poison", "song": "Song",
+                   "ds": "Dmg Shield", "pet": "Pet"}
+CATEGORIES = ("melee", "skill", "ranged", "spell", "poison", "song",
+              "ds", "pet")
 
 
 def _attack_category_and_ability(verb):
-    """Classify a physical-attack verb into ("melee"|"skill", ability_name)."""
+    """Classify a physical-attack verb into
+    ("melee"|"skill"|"ranged", ability_name)."""
     if verb in SKILL_VERBS:
         return "skill", SKILL_VERB_NAMES.get(verb, verb.strip("s").capitalize())
+    if verb in RANGED_VERBS:
+        return "ranged", RANGED_ABILITY
     return "melee", MELEE_ABILITY
 
 # ----------------------------------------------------------------------------
@@ -264,6 +287,30 @@ SELF_HIT_RE = re.compile(
 # found (they're the ones confirmed against real logs).
 LIFETAP_SPELLS = {"lifetap", "lifespike", "lifedraw", "siphon life",
                   "spirit tap"}
+
+# -- thrown weapons (Ranged) -------------------------------------------------
+# Per the user's confirmed formats: a landing throw logs the throw
+# announcement and the hit message on ONE line ("You throw your <Item> at
+# <Target>! <Hit Message> for <N> damage."), a miss logs "You try to throw
+# your <Item> at <Target>, but miss!". The hit regex is permissive about
+# the middle sentence and about "points of" so both phrasings land; the
+# announce-only form (in case the client ever splits the two sentences
+# onto separate lines) arms a short window that re-categorizes the next
+# self-hit as ranged.
+THROWN_HIT_RE = re.compile(
+    TS_RE + r"You throw your (?P<item>.+?) at (?P<target>.+?)!"
+            r"\s*.*? for (?P<amount>\d+)(?: points? of)? damage\.?\s*$")
+THROWN_ANNOUNCE_RE = re.compile(
+    TS_RE + r"You throw your (?P<item>.+?) at (?P<target>.+?)!\s*$")
+THROWN_MISS_RE = re.compile(
+    TS_RE + r"You try to throw your (?P<item>.+?) at (?P<target>.+?), "
+            r"but miss!\s*$")
+# out-of-range / line-of-sight refusals -- no combat info, matched-and-
+# ignored so they can never land in the calibration list
+RANGED_REFUSAL_RE = re.compile(
+    TS_RE + r"(?:Your target is out of range, get closer\.?"
+            r"|You cannot see your target\.?)\s*$")
+THROWN_WINDOW = 2.0   # seconds an announce-only throw stays attributable
 
 # -- self as target ------------------------------------------------------------
 # Melee uses uppercase YOU ("An orc warrior cleaves YOU for 19 points of
@@ -663,6 +710,12 @@ class CombatTracker:
         # level. None until first seen; buff-duration estimates fall back
         # to L50 then.
         self.player_level = None
+        # The player's class combination as /who prints it ("DRU",
+        # "WAR/ENC", ...). Persists across session resets like level --
+        # relogging doesn't respec you; an actual respec shows up in the
+        # next /who. None until first seen. Drives the meter's per-build
+        # all-time data and DMG SOURCES visibility.
+        self.player_classes = None
 
         # Your pet(s): "<Charname>`s warder"-style names match by pattern
         # alone; named pets (necro/mage style, e.g. "Jenann") are learned
@@ -690,6 +743,7 @@ class CombatTracker:
         self._pending_crit_until = 0.0
         self._pending_crit_source = None
         self._pending_casts = {}     # name -> (spell, expires_wall)
+        self._pending_thrown = None  # (item, expires_wall) -- announce-only throw
         # last spell damage that hit YOU -- an enemy cast lands its damage
         # line and its cast-on-you emote in the same instant ("Asaka L`Rei
         # hit you for 12 ... by Lifespike." + "You feel your life force
@@ -706,8 +760,12 @@ class CombatTracker:
         self.melee_dmg_in = 0
         self.skill_dmg_out = 0
         self.skill_dmg_in = 0
+        self.ranged_dmg_out = 0   # bow ("shoot") + thrown weapons
+        self.ranged_dmg_in = 0
         self.spell_dmg_out = 0
         self.spell_dmg_in = 0
+        self.poison_dmg_out = 0   # applied weapon poisons (rogue vials)
+        self.poison_dmg_in = 0
         self.song_dmg_out = 0
         self.song_dmg_in = 0
         self.ds_dmg_out = 0      # your damage shield burning attackers
@@ -846,6 +904,37 @@ class CombatTracker:
             self.ability_kind[ability] = kind
         return kind
 
+    def _is_applied_poison(self, ability):
+        """True when `ability` reads as an APPLIED weapon poison rather
+        than a cast spell. EQL's rogue poisons are activated disciplines
+        ("You activate Asp Venom.") whose procs are "* Strike" spells --
+        confirmed from a real rogue log (Monomate, 2026-07): direct procs
+        log "You hit X for 22 points of poison damage by Asp Venom
+        Strike.", DoT procs "A zombie has taken 16 damage from your Blood
+        Siphon Strike." (attributed!), and Blood Siphon's leech heal is
+        NATIVELY logged ("You healed Monomate for 16 hit points by Blood
+        Siphon Strike.") so no lifetap synthesis applies.
+
+        Recognition: never seen cast by you (cast poison-resist spells
+        like necro DoTs have a "You begin casting" line, so the
+        spell_casts guard keeps them in Spell), AND either poison resist
+        type per the spell file, or a proc-granted "* Strike" spell --
+        the latter catches Stunning Strike, the one rogue poison proc
+        whose resist type is Magic. Without a spell file, fall back to
+        the name ("poison" substring or the "* Strike" suffix)."""
+        if not ability or ability in self.spell_casts:
+            return False
+        name = ability.strip().lower()
+        info = SPELL_DB.lookup(ability)
+        if info is not None:
+            if info.is_beneficial:
+                return False
+            if info.resist_label == "Poison":
+                return True
+            return name.endswith(" strike") \
+                and name in SPELL_DB.proc_names()
+        return "poison" in name or name.endswith(" strike")
+
     # -- fight lifecycle -------------------------------------------------------
     def _ensure_fight(self, wall_time):
         if self.session_start_wall is None:
@@ -896,7 +985,13 @@ class CombatTracker:
 
     def maybe_timeout(self):
         """Call periodically (e.g. from the UI tick) so a fight visibly ends
-        even if no new lines arrive to trigger _ensure_fight."""
+        even if no new lines arrive to trigger _ensure_fight. Also sweeps
+        expired buffs on the same clock: without this, a song whose end
+        was never logged (zoning already handled; quitting the game or
+        closing the meter is not) stayed on the BUFFS list ticking up
+        forever, because the sweep used to run only when new log lines
+        arrived."""
+        self.sweep_expired_buffs(time.time())
         if self.current and \
            time.time() - self._last_activity_wall > self.idle_timeout:
             self._end_fight()
@@ -1149,12 +1244,37 @@ class CombatTracker:
         for n in names:
             info = SPELL_DB.lookup(n)
             if info is None:
+                # unknown spell -- but a SONG can't run long no matter
+                # what it is (see SONG_FALLBACK_SECS); everything else
+                # stays unknowable
+                if self.ability_kind.get(n) == "song" \
+                   or n.strip().lower() in SPELL_DB.bard_song_names():
+                    worst = max(worst, SONG_FALLBACK_SECS)
+                    continue
                 return None
             dur = info.duration_seconds(EQL_LEVEL_CAP)
             if dur == -1:
                 return None
             worst = max(worst, dur)
         return start + worst if worst > 0 else None
+
+    def sweep_expired_buffs(self, now=None):
+        """Close active buffs past their estimated end. SELF-cast ends are
+        reliable (you are the caster; 2s of slack absorbs timestamp
+        rounding); everything else closes only past its WORST-CASE end --
+        the longest any candidate could run for a level-50 caster, plus a
+        tick of slack. Uptime banks at the estimated end, not the sweep
+        moment. Called on every log line AND periodically from the UI tick
+        (maybe_timeout) so buffs expire even while the log is quiet -- e.g.
+        songs seeded from an old log tail after the meter was relaunched."""
+        now = now if now is not None else time.time()
+        for src, grace in ((self._buff_self_expiry, 2.0),
+                           (self._buff_worst_end, 6.0)):
+            for lbl, end in list(src.items()):
+                if now > end + grace:
+                    self._close_buff(lbl, end)
+                    self.buff_events.append((end, lbl, "faded"))
+                    self._notify()
 
     def _close_buff(self, label, wall_time):
         start = self.active_buffs.pop(label, None)
@@ -1426,18 +1546,8 @@ class CombatTracker:
             self.session_start_wall = wall_time
         self._last_line_wall = max(self._last_line_wall, wall_time)
 
-        # sweep expired buffs. SELF-cast ends are reliable (you are the
-        # caster; 2s of slack absorbs timestamp rounding); everything else
-        # closes only past its WORST-CASE end -- the longest any candidate
-        # could run for a level-50 caster, plus a tick of slack. Uptime
-        # banks at the estimated end, not the sweep moment.
-        for src, grace in ((self._buff_self_expiry, 2.0),
-                           (self._buff_worst_end, 6.0)):
-            for lbl, end in list(src.items()):
-                if wall_time > end + grace:
-                    self._close_buff(lbl, end)
-                    self.buff_events.append((end, lbl, "faded"))
-                    self._notify()
+        # sweep expired buffs (see sweep_expired_buffs)
+        self.sweep_expired_buffs(wall_time)
 
         # session boundary: login banner -> wipe ALL session-scoped state
         if SESSION_START_RE.match(line):
@@ -1478,6 +1588,7 @@ class CombatTracker:
             if self.self_name and \
                m.group("name").lower() == self.self_name.lower():
                 self.player_level = int(m.group("level"))
+                self.player_classes = m.group("classes")
                 self._notify()
             return
 
@@ -1591,16 +1702,48 @@ class CombatTracker:
         if HEAL_WITHIN_RE.match(line):
             return   # delayed-heal trigger on someone else -- no amount to record
 
+        # thrown weapons -- must run before SELF_HIT/SELF_MISS: the generic
+        # patterns would otherwise mis-split "your <Item> at <Target>"
+        m = THROWN_HIT_RE.match(line)
+        if m:
+            crit = is_crit or self._consume_crit(YOU_LABEL, wall_time)
+            self._record_damage(wall_time, YOU_LABEL, m.group("target"),
+                                int(m.group("amount")), crit=crit,
+                                category="ranged",
+                                ability=f"Thrown: {m.group('item')}")
+            return
+        m = THROWN_ANNOUNCE_RE.match(line)
+        if m:
+            # announce-only form: the damage line (if any) follows on its
+            # own -- remember the throw so that hit counts as ranged
+            self._pending_thrown = (m.group("item"),
+                                    wall_time + THROWN_WINDOW)
+            return
+        m = THROWN_MISS_RE.match(line)
+        if m:
+            self._record_miss(wall_time, YOU_LABEL, m.group("target"))
+            return
+        if RANGED_REFUSAL_RE.match(line):
+            return   # out of range / no line of sight -- nothing to count
+
         m = SELF_HIT_RE.match(line)
         if m and m.group("verb") not in NON_ATTACK_VERBS:
             if m.group("spell") or m.group("element"):
                 # "...for N points of fire damage by Burst of Flame."
                 ability = m.group("spell") or \
                     f"{m.group('element').capitalize()} damage"
-                category = self._spell_category(ability)
+                category = "poison" if self._is_applied_poison(ability) \
+                    else self._spell_category(ability)
             else:
                 self._note_verb(m.group("verb"), line)
                 category, ability = _attack_category_and_ability(m.group("verb"))
+                pt = self._pending_thrown
+                if pt is not None and category == "melee":
+                    # a plain-verb hit right after an announce-only throw
+                    # IS the throw landing
+                    if wall_time <= pt[1]:
+                        category, ability = "ranged", f"Thrown: {pt[0]}"
+                    self._pending_thrown = None
             crit = is_crit or self._consume_crit(YOU_LABEL, wall_time)
             self._record_damage(wall_time, YOU_LABEL, m.group("target"),
                                 int(m.group("amount")), crit=crit,
@@ -1649,8 +1792,14 @@ class CombatTracker:
             source = YOU_LABEL if caster is None else caster
             spell = m.group("spell")
             crit = is_crit or self._consume_crit(self._n(source), wall_time)
-            cat = self._spell_category(spell) \
-                if self._n(source) == YOU_LABEL else "spell"
+            if self._n(source) == YOU_LABEL:
+                # your poison procs tick ATTRIBUTED too ("...from your
+                # Blood Siphon Strike.") -- same poison-vs-spell split as
+                # the caster-less form
+                cat = "poison" if self._is_applied_poison(spell) \
+                    else self._spell_category(spell)
+            else:
+                cat = "spell"
             self._record_damage(wall_time, source, target, amount, crit=crit,
                                 category=cat, ability=spell)
             if self._n(source) == YOU_LABEL:
@@ -1664,17 +1813,37 @@ class CombatTracker:
             # applied poison/proc. When the target is YOUR PET (confirmed in
             # a real log: mobs' poisons tick on pets with this same line),
             # it's incoming damage -- attributing it to You would inflate
-            # your spell output.
+            # your spell output. Confirmed in a real log (2026-07): the
+            # same caster-less line also prints for a MOB's DoT ticking on
+            # ANOTHER PLAYER ("Lekn has taken 10 damage by Poison Bolt.")
+            # -- a /who-known player target is never your poison, and a
+            # tick on YOU is incoming.
             target = m.group("target")
-            if self._is_pet(self._n(target)):
+            tgt_label = self._n(target)
+            if self._is_pet(tgt_label):
                 self._record_damage(wall_time, "Unknown", target,
                                     int(m.group("amount")), category="spell")
+            elif tgt_label == YOU_LABEL:
+                self._last_spell_on_you = (m.group("spell"), wall_time)
+                self._record_damage(wall_time, m.group("spell"), YOU_LABEL,
+                                    int(m.group("amount")), category="spell")
+            elif tgt_label.lower() in self.known_players \
+                    or re.fullmatch(r"[A-Z][a-z]+", tgt_label):
+                # someone else's incoming DoT -- not yours. Player names
+                # are a single capitalized word; mobs are article-prefixed
+                # ("an orc warrior") or multi-word named mobs ("Priest
+                # Amiaz"). Trade-off: a single-word named MOB you poison
+                # would be skipped here -- rarer and cheaper than crediting
+                # every groupmate's incoming DoT to you.
+                pass
             else:
+                spell = m.group("spell")
+                cat = "poison" if self._is_applied_poison(spell) \
+                    else self._spell_category(spell)
                 self._record_damage(wall_time, YOU_LABEL, target,
                                     int(m.group("amount")),
-                                    category=self._spell_category(m.group("spell")),
-                                    ability=m.group("spell"))
-                self._maybe_record_lifetap_heal(wall_time, m.group("spell"),
+                                    category=cat, ability=spell)
+                self._maybe_record_lifetap_heal(wall_time, spell,
                                                 int(m.group("amount")))
             return
 

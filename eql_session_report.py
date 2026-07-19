@@ -2,10 +2,10 @@
 """
 EQL Session Report
 ====================
-A detailed, read-once breakdown of a play session: damage split six ways
-(Melee / Skill / Spell / Song / Damage Shield / Pet), heal totals, kill
-rate, which spell/ability is carrying your damage or healing, and how your
-Stance/Invocation choices compare in practice. This is the deep-dive
+A detailed, read-once breakdown of a play session: damage split eight
+ways (Melee / Skill / Ranged / Spell / Poison / Song / Damage Shield /
+Pet), heal totals, kill rate, which spell/ability is carrying your damage
+or healing, and how your Stance/Invocation choices compare in practice. This is the deep-dive
 companion to the live DPS/HPS meter overlay (eql_dps_meter.py), which
 stays deliberately small/non-intrusive.
 
@@ -40,11 +40,14 @@ Tabs
                   every spell cast with mana/cast/recast from
                   spells_us.txt.
 * Sessions     -- EVERY session in the log side by side: length, fights,
-                  avg combat DPS, kills/hr, deaths. The best session per
-                  metric gets a star, a chart compares them visually, and
-                  PERSONAL RECORDS persist to a per-character JSON across
-                  runs -- beat one and it's flagged NEW RECORD.
-                  Double-click a session row to open that session.
+                  avg combat DPS, kills/hr, deaths, and the BUILD (/who
+                  class combination) each session ran under. The best
+                  session per metric gets a star, a chart compares them
+                  visually, a Build filter narrows the table+chart to one
+                  class combination (compare your builds against each
+                  other), and PERSONAL RECORDS persist to a per-character
+                  JSON across runs -- beat one and it's flagged NEW
+                  RECORD. Double-click a session row to open that session.
 * Encounters   -- every mob you've fought across EVERY session in the
                   log: search a name, see each attempt (when, session,
                   zone, duration, DPS, damage dealt/taken, deaths,
@@ -152,6 +155,10 @@ def apply_palette(theme_key):
     CAT_COLORS = {   # one color per damage category, used everywhere
         "melee": th["alt"], "skill": th["accent"], "spell": th["warn"],
         "song": th["bad"], "ds": th["fg"], "pet": th["dim"],
+        # ranged/poison blend two roles -- the compact overlay themes only
+        # define six, and these two must stay distinguishable from all
+        "ranged": _mix(th["accent"], th["warn"], 0.5),
+        "poison": _mix(th["alt"], th["bad"], 0.5),
     }
     HEAL_COLOR = th["alt"]
 
@@ -241,12 +248,15 @@ def build_tracker(log_path, lines=None):
 def summarize_session(sess, log_path):
     """One session -> comparable stats dict (for the Sessions tab)."""
     tr = build_tracker(log_path, sess["lines"])
-    dmg_total = (tr.melee_dmg_out + tr.skill_dmg_out + tr.spell_dmg_out +
-                 tr.song_dmg_out + tr.ds_dmg_out + tr.pet_dmg_out)
+    dmg_total = sum(getattr(tr, f"{c}_dmg_out") for c in CATEGORIES)
     biggest = max((s["biggest"] for s in tr.abilities_dmg.values()),
                   default=0)
     return {
         "label": sess["label"], "ts": sess["ts"], "zone": sess["zone"],
+        # the class combination /who printed during THIS session ("?" when
+        # no /who ran) -- the Sessions tab groups/filters by it so builds
+        # can be compared against each other
+        "classes": tr.player_classes or "?",
         "minutes": tr.session_elapsed() / 60.0,
         "fights": tr.fights_completed,
         "avg_dps": tr.avg_combat_dps(),
@@ -1142,11 +1152,12 @@ def _report_window(ctx, settings):
                            justify="left", anchor="w")
     records_lbl.pack(fill="x")
 
-    sess_cols = ("start", "zone", "len", "fights", "dps", "kills", "kph",
-                 "deaths", "big")
+    sess_cols = ("start", "zone", "build", "len", "fights", "dps", "kills",
+                 "kph", "deaths", "big")
     sess_tree = ttk.Treeview(sess_frame, columns=sess_cols,
                              show="tree headings", height=8)
-    for col, label, w in (("start", "Start", 150), ("zone", "Zone", 120),
+    for col, label, w in (("start", "Start", 145), ("zone", "Zone", 105),
+                          ("build", "Build", 75),
                           ("len", "Length", 60), ("fights", "Fights", 50),
                           ("dps", "Avg DPS", 70), ("kills", "Kills", 50),
                           ("kph", "Kills/hr", 60), ("deaths", "Deaths", 50),
@@ -1172,6 +1183,16 @@ def _report_window(ctx, settings):
         sess_chart_row, textvariable=sess_metric_var, state="readonly",
         values=[m for m, _ in SESS_METRICS], width=16)
     sess_metric_box.pack(side="left", padx=(2, 8))
+    # Build filter: the /who class combination each session ran under --
+    # pick one to see (and chart) only that build's sessions, so builds
+    # can be judged against each other on the same metrics
+    tk.Label(sess_chart_row, text="Build:", font=FONT_SMALL,
+             bg=BG, fg=INK).pack(side="left")
+    sess_build_var = tk.StringVar(value="All builds")
+    sess_build_box = ttk.Combobox(
+        sess_chart_row, textvariable=sess_build_var, state="readonly",
+        values=["All builds"], width=12)
+    sess_build_box.pack(side="left", padx=(2, 8))
     tk.Label(sess_chart_row, bg=BG, fg=SUBTLE, font=FONT_SMALL,
              text="★ best session for the metric · double-click a row to "
                   "open that session").pack(side="left")
@@ -1189,8 +1210,19 @@ def _report_window(ctx, settings):
                 update_records(char, state["summaries"])
         return state["summaries"]
 
+    def filtered_summaries():
+        """(real_session_index, summary) pairs surviving the Build filter."""
+        summaries = ensure_summaries()
+        pick = sess_build_var.get()
+        return [(i, s) for i, s in enumerate(summaries)
+                if pick in ("All builds", "", s.get("classes") or "?")]
+
     def refresh_sessions_tab():
         summaries = ensure_summaries()
+        builds = sorted({s.get("classes") or "?" for s in summaries})
+        sess_build_box["values"] = ["All builds"] + builds
+        if sess_build_var.get() not in sess_build_box["values"]:
+            sess_build_var.set("All builds")
         recs = state["records"]
         bits = []
         for key in ("best_avg_dps", "best_kph", "biggest_hit"):
@@ -1204,47 +1236,60 @@ def _report_window(ctx, settings):
         records_lbl.config(text="Personal records —  " + "   |   ".join(bits)
                            if bits else "Personal records: none yet -- go fight something!")
 
-        best_dps = max((s["avg_dps"] for s in summaries
+        rows = filtered_summaries()
+        best_dps = max((s["avg_dps"] for _, s in rows
                         if s["fights"] >= RECORD_MIN_FIGHTS), default=None)
-        best_kph = max((s["kph"] for s in summaries
+        best_kph = max((s["kph"] for _, s in rows
                         if s["kills"] >= RECORD_MIN_KILLS), default=None)
         sess_tree.delete(*sess_tree.get_children())
-        for i, s in enumerate(summaries):
+        for i, s in rows:
             star_d = " ★" if best_dps is not None and s["avg_dps"] == best_dps else ""
             star_k = " ★" if best_kph is not None and s["kph"] == best_kph else ""
             tags = ("best",) if (star_d or star_k) else ()
             sess_tree.insert("", "end", text=str(i + 1), tags=tags, values=(
-                s["ts"], s["zone"] or "?", _fmt_minutes(s["minutes"]),
+                s["ts"], s["zone"] or "?", s.get("classes") or "?",
+                _fmt_minutes(s["minutes"]),
                 s["fights"], f"{s['avg_dps']:.1f}{star_d}", s["kills"],
                 f"{s['kph']:.1f}{star_k}", s["deaths"],
                 _fmt_num(s["biggest"])))
         redraw_sess_chart()
 
     def redraw_sess_chart(*_):
-        summaries = state["summaries"]
-        if not summaries:
+        if not state["summaries"]:
+            return
+        rows = filtered_summaries()
+        if not rows:
             return
         key = dict(SESS_METRICS)[sess_metric_var.get()]
-        vals = [s[key] for s in summaries]
+        vals = [s[key] for _, s in rows]
         best = max(range(len(vals)), key=lambda i: vals[i]) \
             if any(v > 0 for v in vals) else None
         bars = []
-        for i, s in enumerate(summaries):
+        for j, (i, s) in enumerate(rows):
             v = s[key]
             top = f"{v:.1f}" if key in ("avg_dps", "kph") else _fmt_num(v)
-            color = ACCENT if i == best else MUTED_BAR
+            color = ACCENT if j == best else MUTED_BAR
             bars.append((str(i + 1), v, color, top))
-        draw_vbar_chart(sess_canvas, bars,
-                        f"{sess_metric_var.get()} by session", best=best)
+        pick = sess_build_var.get()
+        title = f"{sess_metric_var.get()} by session" \
+            + (f" — {pick}" if pick not in ("All builds", "") else "")
+        draw_vbar_chart(sess_canvas, bars, title, best=best)
 
     sess_metric_box.bind("<<ComboboxSelected>>", redraw_sess_chart)
+    sess_build_box.bind("<<ComboboxSelected>>",
+                        lambda *_: refresh_sessions_tab())
     sess_canvas.bind("<Configure>", redraw_sess_chart)
 
     def open_session_row(_e):
         sel = sess_tree.selection()
         if not sel:
             return
-        idx = sess_tree.index(sel[0])
+        try:
+            # the "#" column carries the REAL session number -- the table
+            # may be filtered to one build, so the row position isn't it
+            idx = int(sess_tree.item(sel[0], "text")) - 1
+        except (ValueError, TypeError):
+            return
         if 0 <= idx < len(state["sessions"]):
             session_box.current(idx)
             refresh()

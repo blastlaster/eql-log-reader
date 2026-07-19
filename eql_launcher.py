@@ -13,6 +13,7 @@ Tools listed here are the standalone, runnable overlays:
     * Friends Overlay    (eql_friend_overlay.py)
     * DPS/HPS Meter      (eql_dps_meter.py)
     * Session Report     (eql_session_report.py)
+    * Atlas Collector    (eql_atlas.py)
 
 eql_overlay_common.py, eql_combat_tracker.py, and eql_spell_db.py are shared
 library code that the tools above import -- there's nothing to start/stop
@@ -84,6 +85,10 @@ TOOLS = [
      "exe": "eql_session_report.exe",
      "desc": "Detailed breakdown: damage/heal by ability, stance/invocation "
              "comparison, spells cast."},
+    {"name": "Atlas Collector", "script": "eql_atlas.py",
+     "exe": "eql_atlas.exe",
+     "desc": "Records what died where and what it dropped -- builds your "
+             "loot/spawn database as you play."},
 ]
 
 # These two are always-on, live overlays meant to track whichever character
@@ -95,7 +100,7 @@ TOOLS = [
 # read-once deep-dive the player opens per session (with its own "Change
 # log..." button and several tabs of state) -- restarting it out from under
 # them would lose their place, so it's deliberately left alone here.
-AUTO_RESTART_TOOLS = {"Friends Overlay", "DPS/HPS Meter"}
+AUTO_RESTART_TOOLS = {"Friends Overlay", "DPS/HPS Meter", "Atlas Collector"}
 
 _EQLOG_NAME_RE = re.compile(r"^eqlog_([A-Za-z0-9]+)_([A-Za-z0-9]+)\.txt$", re.IGNORECASE)
 

@@ -54,7 +54,7 @@ if exist "build" rmdir /s /q "build"
 if exist "dist" rmdir /s /q "dist"
 
 echo.
-echo Building eql_suite.spec (onedir, all four tools, UPX off) ...
+echo Building eql_suite.spec (onedir, all five tools, UPX off) ...
 pyinstaller --noconfirm --clean eql_suite.spec
 if errorlevel 1 (
     echo [ERROR] PyInstaller build failed -- see the output above.
@@ -85,6 +85,7 @@ echo    eql_launcher.exe
 echo    eql_friend_overlay.exe
 echo    eql_dps_meter.exe
 echo    eql_session_report.exe
+echo    eql_atlas.exe
 echo    _internal\   (shared runtime/libraries -- do not remove)
 echo.
 echo  Next: run make_installer.bat to produce
