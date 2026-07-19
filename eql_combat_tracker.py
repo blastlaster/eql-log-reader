@@ -145,10 +145,16 @@ ZONE_RE = re.compile(TS_RE + r"LOADING, PLEASE WAIT\.\.\.\s*$")
 
 # spell housekeeping -- confirmed formats; matched-and-ignored because spell
 # NAMES ("Spell: Flowering Heal") contain combat keywords and would land in
-# the calibration list otherwise
+# the calibration list otherwise. The discipline lines (learning/being
+# granted/activating rogue poisons etc. -- confirmed in a real rogue log)
+# are here for the same reason: "discipline" is itself a calibration
+# keyword.
 SPELL_HOUSEKEEPING_RE = re.compile(
     TS_RE + r"(?:You purchased \d|Beginning to (?:scribe|memorize) "
-            r"|You have finished (?:scribing|memorizing) )")
+            r"|You have finished (?:scribing|memorizing) "
+            r"|You have been granted the following discipline: "
+            r"|You have learned "
+            r"|You activate )")
 
 # Data model (per the user's spec):
 #   SESSION -- starts at "Welcome to EverQuest Legends!" (login). ALL
@@ -899,20 +905,35 @@ class CombatTracker:
         return kind
 
     def _is_applied_poison(self, ability):
-        """True when `ability` reads as an APPLIED weapon poison (rogue
-        poison vials) rather than a cast spell: poison resist type per the
-        spell file (name containing "poison" as the fallback when no spell
-        file is available) AND never seen cast by you this session. Cast
-        poison-resist spells (necro DoTs like Envenomed Bolt) have a "You
-        begin casting" line, so the spell_casts guard keeps them in the
-        Spell category; applied poisons are never cast, they just tick
-        ("An orc warrior has taken 6 damage by Weak Poison.")."""
+        """True when `ability` reads as an APPLIED weapon poison rather
+        than a cast spell. EQL's rogue poisons are activated disciplines
+        ("You activate Asp Venom.") whose procs are "* Strike" spells --
+        confirmed from a real rogue log (Monomate, 2026-07): direct procs
+        log "You hit X for 22 points of poison damage by Asp Venom
+        Strike.", DoT procs "A zombie has taken 16 damage from your Blood
+        Siphon Strike." (attributed!), and Blood Siphon's leech heal is
+        NATIVELY logged ("You healed Monomate for 16 hit points by Blood
+        Siphon Strike.") so no lifetap synthesis applies.
+
+        Recognition: never seen cast by you (cast poison-resist spells
+        like necro DoTs have a "You begin casting" line, so the
+        spell_casts guard keeps them in Spell), AND either poison resist
+        type per the spell file, or a proc-granted "* Strike" spell --
+        the latter catches Stunning Strike, the one rogue poison proc
+        whose resist type is Magic. Without a spell file, fall back to
+        the name ("poison" substring or the "* Strike" suffix)."""
         if not ability or ability in self.spell_casts:
             return False
+        name = ability.strip().lower()
         info = SPELL_DB.lookup(ability)
         if info is not None:
-            return info.resist_label == "Poison" and not info.is_beneficial
-        return "poison" in ability.lower()
+            if info.is_beneficial:
+                return False
+            if info.resist_label == "Poison":
+                return True
+            return name.endswith(" strike") \
+                and name in SPELL_DB.proc_names()
+        return "poison" in name or name.endswith(" strike")
 
     # -- fight lifecycle -------------------------------------------------------
     def _ensure_fight(self, wall_time):
@@ -1771,8 +1792,14 @@ class CombatTracker:
             source = YOU_LABEL if caster is None else caster
             spell = m.group("spell")
             crit = is_crit or self._consume_crit(self._n(source), wall_time)
-            cat = self._spell_category(spell) \
-                if self._n(source) == YOU_LABEL else "spell"
+            if self._n(source) == YOU_LABEL:
+                # your poison procs tick ATTRIBUTED too ("...from your
+                # Blood Siphon Strike.") -- same poison-vs-spell split as
+                # the caster-less form
+                cat = "poison" if self._is_applied_poison(spell) \
+                    else self._spell_category(spell)
+            else:
+                cat = "spell"
             self._record_damage(wall_time, source, target, amount, crit=crit,
                                 category=cat, ability=spell)
             if self._n(source) == YOU_LABEL:
