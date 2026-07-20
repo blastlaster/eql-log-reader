@@ -1,3 +1,55 @@
+# EQL Log Reader — v1.8
+
+**Release date:** July 20, 2026
+
+The Atlas learns quests: a new **Quest window** turns the Project Quarm quest scripts into a searchable database with per-character quest tracking, automatic item-completion counting from your own loot lines, and tracked-quest markers on the Atlas map.
+
+## What's new in v1.8
+
+**Quest window (Atlas).** Right-click the Atlas panel → Quest window. Ships with `eql_quest_db.json.gz` — ~3,300 item turn-ins distilled from the public Project Quarm quest scripts (github.com/SecretsOTheP/quests; same EQMacEmu lineage as EQL): the hand-in NPC and zone, required items and counts, rewards (including choose-one lists), and the NPC's success dialogue. Scripts carry no quest names, so each quest is named by its reward — search matches NPC, zone, and every required/reward item name too.
+
+**Quest search, era-locked.** Search results honor the Atlas **Expansions** locks (right-click → Expansions): with everything off you see only classic-era quests (~1,750), and later-era content appears as you enable Kunark/Velious/Luclin/PoP — the same gating the loot baseline uses.
+
+**My Quests + item tracker.** Add quests to a per-character list (`eql_quest_<Name>_<Server>.json`). Every required item shows live `[have/need]` progress that counts up **automatically when you loot** — the same log lines the collector already parses, credited to the tracked quest first, then the oldest quest still needing the item. Only loot picked up *after* a quest was added counts (a full log re-import can never inflate progress), and `＋`/`－` buttons adjust any count manually for items you already owned or handed away. Completed quests flip to ✓.
+
+**Where do I get it?** Each still-missing item lists its known sources: your own Atlas observations first (ground truth), then the baseline's best drop rates — era-gated, like everything else. Items nothing is known to drop say so honestly (vendor/forage/ground spawns aren't in the drop data).
+
+**Quest tracking on the map.** **Track ▶** a quest and its still-missing items mark their looted spots on the Atlas map window as violet diamonds — a new `quest` layer, toggleable like the rest — and the **hand-in NPC gets a labeled violet pin** at its baseline spawn point whenever you're standing in its zone. The **Guide** button hands an item to the existing Atlas guide, **Hand-in** routes you to the quest NPC (A* along the map geometry in-zone, zone-by-zone directions across the world). **Clear ▶** removes only the tracked quest; the rest of your list is untouched.
+
+**Find and guide understand NPCs and named now.** `find <term>` and `guide <term>` — chat channel and search bar alike — match mob and NPC names as well as items: `find beek guinders` reports where he stands (`*named*` flagged when the baseline thinks so), the map rings your own kill spots of matching mobs *and* their baseline spawn points (dashed rings, hover for the name), and `guide` will happily walk you to a quest giver or a named's camp, not just to loot.
+
+**Availability, proven by your own log.** The quest DB is Quarm's truth, not EQL's — so the Atlas now watches NPC dialogue for each quest's hand-in success text (your imported history counts too). The moment one is observed, that quest is flagged **✔ confirmed on EQL** — permanently, per character — highlighted in search results and stated plainly in the detail pane; everything else says "availability unconfirmed (Quarm data)". Like the loot baseline: a claim until your play proves it.
+
+**The guide tells you who, not just where.** Arriving in the guide's target zone, the Atlas panel now names what you're actually looking for: guiding to an item adds a `from: <the mobs that drop it>` line (your observed sources first, the baseline's best otherwise), and with a quest tracked, standing in the hand-in zone shows `quest: hand in to <NPC>` plus a `still need: ...` list of the missing drops. In the Quest window, **Guide** and **Hand-in** are now toggles with a **persistent status readout** — the distance re-ranges live as you travel, switches to the zone route while you're en route, and stays up until you toggle the guide off (no more 4-second flash).
+
+**Readable buttons on every background.** Text on bright accent surfaces (map/quest toggle chips, pressed buttons, selected list rows, menu highlights) is now solid black instead of the theme's background color — on Neon HUD and in ghost mode that background color is the chroma key, which made active-button text literally see-through over the game.
+
+**Map minimize actually minimizes.** Minimizing a non-ghost map used to leave the window's empty body behind as a blank box (ghost mode was quietly hiding it via the chroma key). The window itself now collapses to just the title bar — same look as ghost — and restores to its previous size, at wherever you dragged the bar in the meantime.
+
+**Map title bar survives narrow windows.** Shrinking the map window horizontally used to push the `–` and `✕` buttons off the edge. The buttons (and the collapse chevron) now always win the space fight; it's the zone name that yields, falling back to the short zone name (`gfaydark`) when the full title no longer fits.
+
+**Friends overlay: minimize + status flash.** The main friends list gains the same `–` minimize as the /who window — collapsed to the title bar, which still shows your character and the online count. While minimized, the bar **flashes** whenever a friend's status changes (comes online, goes offline, or flips AFK), so the collapsed list still taps you on the shoulder.
+
+**Session Report: group members finally count.** Damage by other players used to be matched-and-ignored wholesale — a two-box partner (or any groupmate) showed up in an encounter as a mob you did "0 dmg to". The tracker now learns who's a player from `/who` **and group lines** (`X has joined the group`, group chat), records their damage into the current fight, and the Encounters tab reports it: `group: Fatereaver (29,140 dmg dealt)`, with the mob's "dmg to it" now the true total from everyone. Groupmates can never be mistaken for the fight's mob, in the report or the meter's "vs" line.
+
+**Session Report: the 228-hour session is over.** A session with no combat in it took "now" as its end time, so an idle 9-hour historical session read as 228h in the Sessions tab (and poisoned kills/hour). Session length now ends at the session's own last log line, always.
+
+**Session Report: Cleave is a skill.** EQL's Cleave is an activated skill, not a weapon swing — confirmed in a real log where one character lands both `You slash` (thousands) and `You cleave` (a thousand more). It now gets its own ability row like Kick/Bash instead of melting into Melee. Frenzy's damage also lands on the right target now (its log line phrases the target as "frenzy **on** X", which used to credit a phantom "on X" mob).
+
+**Launcher: characters found outside the default install.** Auto-detect only ever scanned the Windows Daybreak install path — on a custom install location (or a Linux/macOS source run, where that path doesn't exist at all) the Characters roster stayed empty forever, even with a log loaded. The scanner now also covers the active log's own folder and every folder a log has ever been browsed from (remembered in settings): pick one character's log via Browse and all its sibling characters appear in the roster.
+
+**Session Report: seed heals stay out of the calibration tab everywhere.** Sprouting/Budding/Flowering Heal's messages ("You feel a heal sprouting within you.", "The heal within you blooms.") are normally recognized via the game's `spells_us_str.txt` — but on a machine reading a *synced* log with no game install (no spell files), they landed in the unrecognized-lines list, along with EQL's spell-upgrade merge line ("You have successfully merged two items... Sprouting Heal I"). Both are now recognized without the spell files too. The healing itself was always counted either way — it arrives via its own `You healed ... by Sprouting Heal` lines.
+
+**Session Report: stance tables tell the truth.** Two compounding bugs made the Overview/Encounters stance data wrong for long sessions. First, the fight history the stance/invocation tables and the DPS-per-fight chart aggregate over was capped at the live meter's 20 fights — a 24-fight session silently dropped its earliest 4, which happened to be every fight under a different stance (so the whole session read as one stance). Report replays now keep every fight. Second, a fight was labeled by whatever stance it *opened* in; fights are now labeled by their **dominant** stance/invocation — the one active longest during the fight — in the session tables and the Encounters tab alike. Confirmed descriptor mappings were also added from a real log (`overchannel` → Over Channel; channeler/striker/evasive/divine/inversion/unyielding).
+
+**Session Report: no more scrolling into the void.** Resizing the window after scrolling (small window → scroll down → maximize) left the Overview's old scroll offset in place — content stranded mid-canvas with wheel-reachable dead space above and below it. The view now re-clamps on every resize (back to the top when everything fits), and the wheel is a no-op when there's nothing to scroll.
+
+**Session Report: Linux wheel + un-squeezed buffs.** The Overview tab now scrolls with the wheel on Linux (X11 — and Wayland via XWayland, which is how Tk runs there — delivers Button-4/5, not MouseWheel; the one tab drawn on a raw canvas never saw them), and the Abilities tab's bottom row switched to a weighted grid so the Buffs/debuffs table always gets its share of the width instead of being shoved into the corner whenever the window was narrower than the tables wanted. Stances/Invocations tables also gain the missing **Channeler** and **Unyielding** effect descriptions (from eqlwiki).
+
+`eql_quest_db_build.py` (dev tool) regenerates the database from a checkout of the quest scripts plus a Quarm database dump (for item/zone names and eras).
+
+---
+
 # EQL Log Reader — v1.7
 
 **Release date:** July 21, 2026

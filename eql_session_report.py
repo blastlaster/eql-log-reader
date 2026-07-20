@@ -229,7 +229,20 @@ def build_tracker(log_path, lines=None):
     which case the tracker's own session resets make it equal to the
     latest session). The trailing open fight is flushed so completed-fight
     stats (avg combat DPS etc.) include it."""
-    tracker = CombatTracker(self_name=char_name_from(log_path))
+    # history_maxlen=None: a replay must keep EVERY fight -- the stance/
+    # invocation tables and DPS-per-fight chart read tracker.history, and
+    # the live meter's 20-fight cap silently dropped a long session's
+    # earliest fights (which is how a mixed-stance session read as all
+    # one stance)
+    try:
+        tracker = CombatTracker(self_name=char_name_from(log_path),
+                                history_maxlen=None)
+    except TypeError:
+        # an older eql_combat_tracker.py without the parameter (mixed-file
+        # update). Don't crash the whole report over it -- fall back to
+        # the old capped-history behavior; the fix needs the tracker file
+        # updated alongside this one.
+        tracker = CombatTracker(self_name=char_name_from(log_path))
     SPELL_DB.set_game_dir_hint(os.path.dirname(os.path.dirname(log_path)))
     if lines is None:
         try:
@@ -309,12 +322,16 @@ def encounter_from_fight(fight, si, sess):
         "critpct": round(100 * you["crits"] / you["hits"]) if you["hits"] else 0,
         "big": you["biggest_hit"],
         "kills": fight.kills, "deaths": fight.deaths,
-        "stance": fight.stance or "?",
-        "invocation": fight.invocation or "?",
+        # dominant (longest-active) stance, not whatever the fight opened in
+        "stance": fight.main_stance() or "?",
+        "invocation": fight.main_invocation() or "?",
         "abilities": {k: dict(v) for k, v in fight.abilities_dmg.items()},
         "heals": {k: dict(v) for k, v in fight.abilities_heal.items()},
         "casts": dict(fight.spell_casts),
         "resists": dict(fight.spell_resists),
+        # group members' (and their pets') damage during this fight --
+        # the tracker records third-party lines involving known players
+        "allies": fight.allies(),
     }
 
 
@@ -801,18 +818,48 @@ def _report_window(ctx, settings):
     dash_canvas.configure(yscrollcommand=dash_scroll.set)
     dash_scroll.pack(side="right", fill="y")
     dash_canvas.pack(side="left", fill="both", expand=True)
-    dash.bind("<Configure>", lambda e: dash_canvas.configure(
-        scrollregion=dash_canvas.bbox("all")))
-    dash_canvas.bind("<Configure>", lambda e: dash_canvas.itemconfigure(
-        dash_win, width=e.width))
+    def _update_dash_region(_e=None):
+        bbox = dash_canvas.bbox("all") or (0, 0, 0, 0)
+        dash_canvas.configure(scrollregion=bbox)
+        # re-clamp the view whenever content or viewport changes size:
+        # Tk keeps the old pixel offset, so scroll-down-then-maximize
+        # stranded the content mid-canvas with dead space above AND below
+        # it, all still wheel-reachable
+        ch = max(bbox[3] - bbox[1], 1)
+        vh = dash_canvas.winfo_height()
+        if ch <= vh:
+            dash_canvas.yview_moveto(0)
+        else:
+            top = dash_canvas.canvasy(0)
+            if top < bbox[1]:
+                dash_canvas.yview_moveto(0)
+            elif top + vh > bbox[3]:
+                dash_canvas.yview_moveto((bbox[3] - vh - bbox[1]) / ch)
 
-    def _on_wheel(e):
+    dash.bind("<Configure>", _update_dash_region)
+    dash_canvas.bind("<Configure>", lambda e: (
+        dash_canvas.itemconfigure(dash_win, width=e.width),
+        _update_dash_region()))
+
+    def _dash_scroll(step):
         try:
-            if nb.select() == str(dash_outer):
-                dash_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+            if nb.select() != str(dash_outer):
+                return
+            bbox = dash_canvas.bbox("all") or (0, 0, 0, 0)
+            if bbox[3] - bbox[1] <= dash_canvas.winfo_height():
+                return               # everything visible -- nothing to scroll
+            dash_canvas.yview_scroll(step, "units")
         except tk.TclError:
             pass
-    root.bind_all("<MouseWheel>", _on_wheel)
+
+    # Windows/macOS deliver <MouseWheel>; X11 (Linux) has no such event --
+    # its wheel is Button-4/Button-5, which is why the Overview was the
+    # one tab that wouldn't scroll there (every other tab is native ttk
+    # widgets with their own X11 wheel bindings)
+    root.bind_all("<MouseWheel>",
+                  lambda e: _dash_scroll(-1 if e.delta > 0 else 1))
+    root.bind_all("<Button-4>", lambda e: _dash_scroll(-1))
+    root.bind_all("<Button-5>", lambda e: _dash_scroll(1))
 
     # row 1: headline stat cards
     cards_canvas = tk.Canvas(dash, bg=BG, highlightthickness=0, height=92)
@@ -1042,9 +1089,18 @@ def _report_window(ctx, settings):
 
     lower = tk.Frame(abil_frame, bg=BG)
     lower.pack(fill="both", expand=True)
+    # Weighted uniform grid, NOT pack: pack hands out width in pack order,
+    # so whenever the three trees' requested widths exceeded the window,
+    # the buffs column (packed last) collapsed to a sliver -- and stayed
+    # collapsed after any reload. uniform+weight divides whatever width
+    # actually exists 30/40/30 at every window size.
+    lower.grid_columnconfigure(0, weight=3, uniform="lower")
+    lower.grid_columnconfigure(1, weight=4, uniform="lower")
+    lower.grid_columnconfigure(2, weight=3, uniform="lower")
+    lower.grid_rowconfigure(0, weight=1)
 
     heal_col = tk.Frame(lower, bg=BG)
-    heal_col.pack(side="left", fill="both", expand=True, padx=(0, 4))
+    heal_col.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
     tk.Label(heal_col, text="Healing by ability", font=FONT_TITLE, bg=BG,
              fg=INK, anchor="w").pack(fill="x")
     heal_tree = ttk.Treeview(heal_col, columns=("total", "hits", "biggest"),
@@ -1059,7 +1115,7 @@ def _report_window(ctx, settings):
     setup_stripes(heal_tree)
 
     casts_col = tk.Frame(lower, bg=BG)
-    casts_col.pack(side="left", fill="both", expand=True, padx=(0, 4))
+    casts_col.grid(row=0, column=1, sticky="nsew", padx=(0, 4))
     casts_hdr = tk.Label(casts_col,
                          text="Spells cast (spell data from spells_us.txt)",
                          font=FONT_TITLE, bg=BG, fg=INK, anchor="w")
@@ -1069,15 +1125,15 @@ def _report_window(ctx, settings):
                                        "duration", "resisted", "fizzled",
                                        "interrupted"),
                               show="tree headings", height=8)
-    for col, label, w in (("count", "Casts", 50), ("mana", "Mana", 50),
-                          ("cast", "Cast", 55), ("recast", "Recast", 60),
-                          ("duration", "Duration", 70),
-                          ("resisted", "Resisted", 60),
-                          ("fizzled", "Fizzled", 55),
-                          ("interrupted", "Interrupted", 75)):
+    for col, label, w in (("count", "Casts", 45), ("mana", "Mana", 45),
+                          ("cast", "Cast", 48), ("recast", "Recast", 52),
+                          ("duration", "Duration", 60),
+                          ("resisted", "Resisted", 55),
+                          ("fizzled", "Fizzled", 50),
+                          ("interrupted", "Interrupted", 62)):
         casts_tree.heading(col, text=label)
         casts_tree.column(col, width=w, anchor="center")
-    casts_tree.column("#0", width=170)
+    casts_tree.column("#0", width=140)
     casts_tree.heading("#0", text="Spell")
     casts_tree.pack(fill="both", expand=True, pady=(2, 0))
     setup_stripes(casts_tree)
@@ -1097,7 +1153,7 @@ def _report_window(ctx, settings):
         return f"{secs}s"
 
     buffs_col = tk.Frame(lower, bg=BG)
-    buffs_col.pack(side="left", fill="both", expand=True)
+    buffs_col.grid(row=0, column=2, sticky="nsew")
     tk.Label(buffs_col, text="Buffs/debuffs on you (matched via "
                              "spells_us_str.txt messages)",
              font=FONT_TITLE, bg=BG, fg=INK, anchor="w").pack(fill="x")
@@ -1497,6 +1553,10 @@ def _report_window(ctx, settings):
             _enc_put("\ncasts: " + ",  ".join(
                 f"{k} x{v}" for k, v in sorted(e["casts"].items())) + "\n",
                 "dim")
+        if e.get("allies"):
+            group = ",  ".join(f"{n} ({_fmt_num(d)} dmg dealt)"
+                               for n, d in e["allies"][:6])
+            _enc_put(f"\ngroup: {group}\n", "b")
         if len(e["mobs"]) > 1:
             others = ",  ".join(f"{n} ({_fmt_num(di)} dmg to it)"
                                 for n, di, _do in e["mobs"][1:6])

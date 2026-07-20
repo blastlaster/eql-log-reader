@@ -507,6 +507,9 @@ def run_overlay(log_path):
         # collapsed /who window: only the title bar shows (it carries the
         # player count and the time of the last /who pull)
         "who_min": False,
+        # collapsed MAIN list: only the title bar (char + online count)
+        # shows; the bar FLASHES when a friend's status changes underneath
+        "main_min": False,
         # element size (1.0/0.9/0.8/0.7/0.6): shrinks paddings and spacing;
         # FONTS STAY THE SAME so the data stays readable. Text height sets
         # the floor, so most of the gain is in margins and row spacing.
@@ -596,6 +599,9 @@ def run_overlay(log_path):
     title_lbl = tk.Label(bar, text="  FRIENDS", bg=PANEL, fg=ACCENT,
                          font=title_font, anchor="w")
     title_lbl.pack(side="left", pady=2)
+    min_lbl = tk.Label(bar, text=" – ", bg=PANEL, fg=DIM, font=title_font,
+                       cursor="hand2")
+    min_lbl.pack(side="right", padx=2)
     status_lbl = tk.Label(bar, text="", bg=PANEL, fg=DIM, font=info_font)
     status_lbl.pack(side="right", padx=6)
 
@@ -607,7 +613,9 @@ def run_overlay(log_path):
         """Re-apply size-dependent paddings (fonts are untouched)."""
         title_lbl.pack_configure(pady=sc(2))
         status_lbl.pack_configure(padx=sc(6))
-        body.pack_configure(padx=sc(6), pady=(sc(2), sc(6)))
+        # pack_configure would re-manage a minimize-hidden body
+        if not settings.get("main_min", False):
+            body.pack_configure(padx=sc(6), pady=(sc(2), sc(6)))
 
     apply_scale()
 
@@ -628,6 +636,61 @@ def run_overlay(log_path):
         w.bind("<ButtonPress-1>", on_press)
         w.bind("<B1-Motion>", on_drag)
         w.bind("<ButtonRelease-1>", on_release)
+
+    # -- minimize: collapse to the title bar (char + online count stay) ------
+    # While minimized the bar FLASHES whenever a friend's status changes
+    # (online/offline/AFK) -- the list is hidden, so the bar is the alert.
+    flash = {"job": None, "n": 0, "sig": None}
+
+    def _bar_flash_colors(lit):
+        """Bar chrome in alert (accent bg, solid-black text -- never a
+        theme's bg color, which Neon HUD chroma-keys) or normal colors."""
+        bg = ACCENT if lit else PANEL
+        bar.configure(bg=bg)
+        title_lbl.configure(bg=bg, fg="#000000" if lit else ACCENT)
+        status_lbl.configure(bg=bg, fg="#000000" if lit else DIM)
+        min_lbl.configure(bg=bg, fg="#000000" if lit else DIM)
+
+    def stop_flash():
+        if flash["job"] is not None:
+            try:
+                root.after_cancel(flash["job"])
+            except ValueError:
+                pass
+            flash["job"] = None
+        flash["n"] = 0
+        _bar_flash_colors(False)
+
+    def _flash_step():
+        flash["job"] = None
+        if flash["n"] <= 0 or not settings.get("main_min", False):
+            stop_flash()
+            return
+        flash["n"] -= 1
+        _bar_flash_colors(flash["n"] % 2 == 1)
+        flash["job"] = root.after(350, _flash_step)
+
+    def start_flash():
+        flash["n"] = 10                  # ~3.5s of blinking
+        if flash["job"] is None:
+            _flash_step()
+
+    def apply_main_min():
+        mini = settings.get("main_min", False)
+        min_lbl.config(text=" □ " if mini else " – ")
+        if mini:
+            body.pack_forget()
+        else:
+            stop_flash()                 # you're looking at the list now
+            body.pack(fill="both", expand=True, padx=sc(6),
+                      pady=(sc(2), sc(6)))
+
+    def toggle_main_min(e=None):
+        settings["main_min"] = not settings.get("main_min", False)
+        save_settings()
+        apply_main_min()
+
+    min_lbl.bind("<Button-1>", toggle_main_min)
 
     # -- /who results window (optional) ----------------------------------------
     # Non-friend /who searches ("Players in EverQuest Legends:") never touch
@@ -785,6 +848,7 @@ def run_overlay(log_path):
         bar.configure(bg=PANEL)
         title_lbl.configure(bg=PANEL, fg=ACCENT)
         status_lbl.configure(bg=PANEL, fg=DIM)
+        min_lbl.configure(bg=PANEL, fg=DIM)
         body.configure(bg=BG)
         # transparent theme (Neon HUD): bg is a chroma key -- only the text
         # floats over the game; the title bar keeps its non-key panel color
@@ -836,6 +900,14 @@ def run_overlay(log_path):
 
         tracker = live["tracker"]
         rows = tracker.sorted_friends()
+        # status signature: while minimized, any online/offline/AFK
+        # transition flashes the title bar (the list itself is hidden)
+        sig = tuple(sorted((name, f.get("online", False),
+                            bool(f.get("afk"))) for name, f in rows))
+        if (flash["sig"] is not None and sig != flash["sig"]
+                and settings.get("main_min", False)):
+            start_flash()
+        flash["sig"] = sig
         online_ct = sum(1 for _, f in rows if f.get("online"))
         title_lbl.config(
             text=f"  {live['char'].upper()}  {online_ct}/{len(rows)}")
@@ -1041,6 +1113,7 @@ def run_overlay(log_path):
         finally:
             root.after(POLL_INTERVAL_MS, tick)
 
+    apply_main_min()
     render()
     tick()
     root.mainloop()

@@ -68,10 +68,13 @@ ZBAND = 20                  # floor filter half-height: one dungeon story
 
 LAYER_DEFAULTS = {"map": True, "labels": True, "loot": True, "kills": False,
                   "coin": False, "notes": True, "named": True,
-                  "deaths": True, "trail": True, "find": True}
+                  "deaths": True, "trail": True, "find": True,
+                  "quest": True}
 
 FIND_COLOR = "#ff8c1a"      # 'find' hit markers: orange in every theme,
                             # distinct from the loot/warn palette roles
+QUEST_COLOR = "#b18aff"     # tracked-quest item markers: violet, apart
+                            # from find's orange (same value as eql_quest)
 
 PITCH_3D = math.radians(55)          # tilt when [3D] is switched on
 YAW_3D = math.radians(30)
@@ -237,17 +240,24 @@ class AtlasMapWindow:
         # into it via the chevron.
         self.bar = tk.Frame(self.top, cursor="fleur")
         self.bar.pack(fill="x")
+        # pack order = squeeze priority: the ✕ / – buttons and the chevron
+        # are packed BEFORE the zone label, so a narrow window truncates
+        # the zone text instead of pushing the buttons off the edge (the
+        # label also falls back to the short zone name -- see
+        # _fit_zone_label)
         self.col_btn = tk.Label(self.bar, text="▾", cursor="hand2")
         self.col_btn.pack(side="left", padx=(6, 0))
         self.col_btn.bind("<Button-1>", lambda e: self._toggle_collapse())
-        self.zone_lbl = tk.Label(self.bar, text=" no zone", anchor="w")
-        self.zone_lbl.pack(side="left", padx=4)
         self.close_lbl = tk.Label(self.bar, text=" ✕ ", cursor="hand2")
         self.close_lbl.pack(side="right", padx=2)
         self.close_lbl.bind("<Button-1>", lambda e: self.hide())
         self.min_btn = tk.Label(self.bar, text=" – ", cursor="hand2")
         self.min_btn.pack(side="right")
         self.min_btn.bind("<Button-1>", lambda e: self._toggle_min())
+        self.zone_lbl = tk.Label(self.bar, text=" no zone", anchor="w")
+        self.zone_lbl.pack(side="left", padx=4)
+        self._zone_full = " no zone"     # preferred label text
+        self._zone_brief = " no zone"    # short-name fallback when narrow
         self._tdrag = None
         for w in (self.bar, self.zone_lbl):
             w.bind("<ButtonPress-1>", self._title_press)
@@ -438,10 +448,24 @@ class AtlasMapWindow:
             self.bar2.pack_forget()
             self.canvas.pack_forget()
             self.grip.place_forget()
+            # shrink the WINDOW to the title bar too: the geometry was set
+            # explicitly, so unpacking the children alone leaves the empty
+            # body as a blank box (ghost hid it via the chroma key; plain
+            # themes showed it). _on_configure skips saving while
+            # minimized, so map_geom keeps the real size for restore.
+            self.top.update_idletasks()
+            self.top.geometry(f"{self.top.winfo_width()}"
+                              f"x{self.bar.winfo_reqheight()}")
         else:
             self.canvas.pack(fill="both", expand=True)
             self._apply_collapse()
             self._apply_frame()          # re-place the grip if borderless
+            # restore the pre-minimize SIZE at the current position (the
+            # bar may have been dragged while minimized)
+            size = self.settings.get("map_geom", "760x600").split("+")[0]
+            pos = self.top.geometry().split("+", 1)
+            if len(pos) == 2:
+                self.top.geometry(f"{size}+{pos[1]}")
 
     def _toggle_min(self):
         self.settings["map_min"] = not self.settings.get("map_min")
@@ -470,7 +494,10 @@ class AtlasMapWindow:
 
     def _on_configure(self, e):
         if e.widget is self.top:
-            self.settings["map_geom"] = self.top.geometry()
+            # the minimized (bar-only) size must never overwrite the real
+            # geometry, or restore would come back bar-sized
+            if not self.settings.get("map_min"):
+                self.settings["map_geom"] = self.top.geometry()
             # saved on close/drag elsewhere; don't hammer the disk here
             self._schedule_reflow()
 
@@ -505,6 +532,25 @@ class AtlasMapWindow:
             ctrl.remove(self.pin_check)
         self._reflow(self.ctrl, ctrl)
         self._reflow(self.bar2, self._layer_widgets)
+        self._fit_zone_label()
+
+    def _fit_zone_label(self):
+        """Long zone titles yield to the window: when the full 'Long Name
+        (short)  [N lines]' text can't fit beside the bar buttons, fall
+        back to just the short zone name -- the – / ✕ buttons must stay
+        visible and clickable at any width."""
+        w = self.top.winfo_width()
+        if w <= 10:                      # not realized yet: keep full text
+            text = self._zone_full
+        else:
+            used = (self.col_btn.winfo_reqwidth()
+                    + self.min_btn.winfo_reqwidth()
+                    + self.close_lbl.winfo_reqwidth() + 22)
+            text = (self._zone_full
+                    if self.mono.measure(self._zone_full) <= w - used
+                    else self._zone_brief)
+        if self.zone_lbl.cget("text") != text:
+            self.zone_lbl.config(text=text)
 
     def _schedule_reflow(self):
         if self._reflow_pending is None:
@@ -527,7 +573,8 @@ class AtlasMapWindow:
         for btn in (self.fit_btn, self.floor_up, self.floor_dn):
             btn.configure(bg=th["panel"], fg=th["fg"], padx=10, pady=3,
                           activebackground=th["accent"],
-                          activeforeground=th["bg"], font=self.mono)
+                          activeforeground="#000000",
+                          font=self.mono)
         # chips carry their own state colors -- see _restyle_checks. (And
         # never paint any surface the exact theme bg: in ghost mode that's
         # the chroma key, i.e. a click-through hole.)
@@ -583,16 +630,22 @@ class AtlasMapWindow:
 
     def _restyle_checks(self):
         """Recolor every toggle chip to match its actual state: accent
-        background + dark text when ON, panel + dim text when OFF."""
+        background + dark text when ON, panel + dim text when OFF. Dark
+        text means the theme's ink, NEVER its bg: on transparent themes
+        bg is the chroma key, and key-colored text is a see-through hole
+        -- unreadable over a bright game background."""
         th = getattr(self, "_th", None)
         if not th:
             return                      # traces fire during __init__ too
+        # SOLID BLACK on the bright accent chips, in every theme: any
+        # theme's bg can become the chroma key in ghost mode, so no text
+        # may ever be painted in it
         for cb, var in self._check_pairs:
             on = bool(var.get())
             cb.configure(selectcolor=th["accent"], bg=th["panel"],
-                         fg=th["bg"] if on else th["dim"],
+                         fg="#000000" if on else th["dim"],
                          activebackground=th["accent"],
-                         activeforeground=th["bg"])
+                         activeforeground="#000000")
 
     def _toggle_ghost(self):
         self.settings["map_ghost"] = self.ghost_var.get()
@@ -804,14 +857,18 @@ class AtlasMapWindow:
         self.zone_short = short
         self.zone_long = long_name or short or ""
         if not short:
-            self.zone_lbl.config(text=" zone unknown -- /who will sync it")
+            self._zone_full = " zone unknown -- /who will sync it"
+            self._zone_brief = " no zone"
+            self._fit_zone_label()
             self.canvas.delete("all")
             self.zmap = None
             return
         self.zmap = ZoneMap.load(self.map_dirs, short)
         got = (f"{len(self.zmap.lines)} lines" if self.zmap
                else "no map file -- install Brewall's pack to maps\\brewall")
-        self.zone_lbl.config(text=f" {self.zone_long} ({short})  [{got}]")
+        self._zone_full = f" {self.zone_long} ({short})  [{got}]"
+        self._zone_brief = f" {short}"
+        self._fit_zone_label()
         self.canvas.delete("all")
         self._pool_key = None          # pooled items died with the canvas
         self._pool = []
@@ -945,7 +1002,7 @@ class AtlasMapWindow:
         tracker, db, baseline = self._ctx
         th = self._th
         self._hover = {}
-        for tag in ("events", "notes", "named", "find", "tip"):
+        for tag in ("events", "notes", "named", "find", "quest", "tip"):
             self.canvas.delete(tag)
         z = db.data["zones"].get(self.zone_short)
 
@@ -986,21 +1043,42 @@ class AtlasMapWindow:
                                     else f"x{d['count']}")
                             tip.append(f"  {item}  {rate}")
                     self._hover[iid] = tip
-            # 'find <item>' hits: orange rings on every spot the searched
-            # item has been looted in this zone ('find off' clears them)
+            # 'find <item|npc>' hits: orange rings on every spot the item
+            # was looted OR the matching mob/NPC was killed in this zone
+            # ('find off' clears them)
             if self._layers["find"] and getattr(tracker, "find_query", None):
                 term = tracker.find_query[0]
                 excl = getattr(tracker, "find_exclude", ())
                 for ev in z["events"]:
-                    if (ev[1] != "L" or ev[4] is None or not ev[3]
-                            or term not in ev[3].lower()
+                    subj = (ev[3] if ev[1] == "L"
+                            else ev[2] if ev[1] == "K" else None)
+                    if (subj is None or ev[4] is None
+                            or term not in subj.lower()
                             or not wpass(ev[6])
-                            or any(x in ev[3].lower() for x in excl)):
+                            or any(x in subj.lower() for x in excl)):
                         continue
                     cx, cy = self._w2c(ev[4], ev[5], ev[6] or 0)
                     self.canvas.create_oval(cx - 7, cy - 7, cx + 7, cy + 7,
                                             tags="find", outline=FIND_COLOR,
                                             width=2)
+            # tracked quest (Quest window): violet diamonds on every spot
+            # a still-missing quest item has dropped in this zone. Exact
+            # name match -- quest items are specific, not substrings.
+            if self._layers["quest"] and getattr(tracker, "quest_marks",
+                                                 None):
+                marks = tracker.quest_marks
+                for ev in z["events"]:
+                    if (ev[1] != "L" or ev[4] is None or not ev[3]
+                            or ev[3].lower() not in marks
+                            or not wpass(ev[6])):
+                        continue
+                    cx, cy = self._w2c(ev[4], ev[5], ev[6] or 0)
+                    iid = self.canvas.create_polygon(
+                        cx, cy - 8, cx + 8, cy, cx, cy + 8, cx - 8, cy,
+                        tags=("quest", "events"), outline=QUEST_COLOR,
+                        fill="", width=2)
+                    self._hover[iid] = [f"{ev[3]}  (quest item)",
+                                        f"<- {ev[2]}"]
             if self._layers["notes"]:
                 for note in z.get("notes", []):
                     if not note.get("loc"):
@@ -1014,6 +1092,47 @@ class AtlasMapWindow:
                     self.canvas.create_text(cx + 7, cy, text=note["text"],
                                             tags="notes", fill=th["accent"],
                                             font=self.mono, anchor="w")
+
+        # 'find' also marks matching mobs/NPCs at their baseline spawn
+        # points -- quest givers and named you haven't met yet included
+        # (independent of observed data, so it works in a fresh zone)
+        if (self._layers["find"] and baseline.ok and self.zone_short
+                and getattr(tracker, "find_query", None)):
+            term = tracker.find_query[0]
+            excl = getattr(tracker, "find_exclude", ())
+            for key, rec in baseline.npcs.get(self.zone_short, {}).items():
+                if term not in key or any(x in key for x in excl):
+                    continue
+                tip = [rec["name"], "spawn point (map data)"]
+                for s in rec["spawns"]:
+                    if not wpass(s[2]):
+                        continue
+                    cx, cy = self._w2c(s[1], s[0], s[2])
+                    iid = self.canvas.create_oval(
+                        cx - 7, cy - 7, cx + 7, cy + 7,
+                        tags=("find", "events"), outline=FIND_COLOR,
+                        width=2, dash=(3, 3))
+                    self._hover[iid] = tip
+
+        # tracked quest's HAND-IN NPC: a violet labeled square at its
+        # spawn point(s) whenever you're in the hand-in zone
+        qnpc = getattr(tracker, "quest_npc", None)
+        if (self._layers["quest"] and baseline.ok and qnpc
+                and qnpc[1] == self.zone_short):
+            rec = baseline.npcs.get(self.zone_short, {}).get(qnpc[0])
+            for s in (rec["spawns"] if rec else ()):
+                if not wpass(s[2]):
+                    continue
+                cx, cy = self._w2c(s[1], s[0], s[2])
+                iid = self.canvas.create_rectangle(
+                    cx - 6, cy - 6, cx + 6, cy + 6,
+                    tags=("quest", "events"), outline=QUEST_COLOR, width=2)
+                self.canvas.create_text(cx + 10, cy,
+                                        text=f"hand in: {qnpc[2]}",
+                                        tags="quest", fill=QUEST_COLOR,
+                                        font=self.mono, anchor="w")
+                self._hover[iid] = [f"hand in: {qnpc[2]}",
+                                    "tracked quest turn-in"]
 
         if self._layers["named"] and baseline.ok and self.zone_short:
             observed = z["mobs"] if z else {}

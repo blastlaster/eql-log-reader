@@ -10,7 +10,7 @@
 ; Bump MyAppVersion below each release.
 
 #define MyAppName "EQL Log Reader"
-#define MyAppVersion "1.7"
+#define MyAppVersion "1.8"
 #define MyAppPublisher "EQL Log Reader"
 #define MyAppExeName "eql_launcher.exe"
 

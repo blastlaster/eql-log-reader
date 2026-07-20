@@ -28,12 +28,15 @@ Character auto-detect
 The game writes one log file per character+server: `eqlog_<Name>_<Server>.txt`
 under the install's Logs folder, and (if you've exported one) an inventory
 file `<Name>_<Server>-Inventory.txt` alongside it at the game's root folder.
-"Auto-detect" scans the default Daybreak install directory for every
-eqlog_*.txt it can find and lists one row per character+server -- click
-"Select" to make that character active (this sets the log file the tools
-above will use), or "Hide" to tuck away an old/unused character. Re-running
-Auto-detect always reflects exactly what's currently in the game folder --
-new characters appear, ones whose log file is gone disappear.
+"Auto-detect" scans the default Daybreak install directory AND every folder
+a log file has ever been browsed from (so custom install locations -- and
+Linux/macOS source runs, where the Windows path doesn't exist -- get a
+roster too: picking one character's log via Browse lists all its sibling
+characters). One row per character+server -- click "Select" to make that
+character active (this sets the log file the tools above will use), or
+"Hide" to tuck away an old/unused character. Re-running Auto-detect always
+reflects exactly what's currently on disk -- new characters appear, ones
+whose log file is gone disappear.
 """
 
 import glob
@@ -105,44 +108,61 @@ AUTO_RESTART_TOOLS = {"Friends Overlay", "DPS/HPS Meter", "Atlas Collector"}
 _EQLOG_NAME_RE = re.compile(r"^eqlog_([A-Za-z0-9]+)_([A-Za-z0-9]+)\.txt$", re.IGNORECASE)
 
 
-def discover_characters():
-    """Scan the default Daybreak install dir for every eqlog_<Name>_<Server>.txt
-    file, a few levels deep (games live at base/<GameName>/Logs/eqlog_*.txt).
+def discover_characters(extra_dirs=()):
+    """Scan for every eqlog_<Name>_<Server>.txt: the default Daybreak
+    install dir a few levels deep (games live at
+    base/<GameName>/Logs/eqlog_*.txt), plus each of `extra_dirs` flat --
+    the folders the user has actually browsed logs from. That's what makes
+    auto-detect work on non-default installs and on Linux/macOS source
+    runs, where the Windows install path doesn't exist at all: the roster
+    lists every sibling character of any log you've ever picked.
     Returns {char_id: {"id", "name", "server", "log_path", "inventory_path"}},
     one entry per character+server -- freshly built every call, so it always
     reflects exactly what's on disk right now."""
     found = {}
-    base = DEFAULT_INSTALL_DIR
-    if not os.path.isdir(base):
-        return found
-    for depth in ("", "*", os.path.join("*", "*"), os.path.join("*", "*", "*")):
-        for path in glob.glob(os.path.join(base, depth, "eqlog_*.txt")):
-            m = _EQLOG_NAME_RE.match(os.path.basename(path))
-            if not m:
-                continue
-            name, server = m.group(1), m.group(2)
-            cid = f"{name}_{server}"
-            # inventory export (if any) lives at the game root, one level up
-            # from the Logs folder the eqlog file itself is in.
-            game_root = os.path.dirname(os.path.dirname(path))
-            inv_path = os.path.join(game_root, f"{name}_{server}-Inventory.txt")
-            if not os.path.isfile(inv_path):
-                inv_path = None
-            entry = {"id": cid, "name": name, "server": server,
-                     "log_path": path, "inventory_path": inv_path}
-            existing = found.get(cid)
-            if existing is None or os.path.getmtime(path) > os.path.getmtime(existing["log_path"]):
+
+    def take(path):
+        m = _EQLOG_NAME_RE.match(os.path.basename(path))
+        if not m:
+            return
+        name, server = m.group(1), m.group(2)
+        cid = f"{name}_{server}"
+        # inventory export (if any) lives at the game root, one level up
+        # from the Logs folder the eqlog file itself is in.
+        game_root = os.path.dirname(os.path.dirname(os.path.abspath(path)))
+        inv_path = os.path.join(game_root, f"{name}_{server}-Inventory.txt")
+        if not os.path.isfile(inv_path):
+            inv_path = None
+        entry = {"id": cid, "name": name, "server": server,
+                 "log_path": path, "inventory_path": inv_path}
+        existing = found.get(cid)
+        try:
+            if existing is None or (os.path.getmtime(path)
+                                    > os.path.getmtime(existing["log_path"])):
                 found[cid] = entry
+        except OSError:
+            pass
+
+    base = DEFAULT_INSTALL_DIR
+    if os.path.isdir(base):
+        for depth in ("", "*", os.path.join("*", "*"),
+                      os.path.join("*", "*", "*")):
+            for path in glob.glob(os.path.join(base, depth, "eqlog_*.txt")):
+                take(path)
+    for d in extra_dirs:
+        if d and os.path.isdir(d):
+            for path in glob.glob(os.path.join(d, "eqlog_*.txt")):
+                take(path)
     return found
 
 
-def _match_discovered_character(path):
+def _match_discovered_character(path, extra_dirs=()):
     """If `path` is exactly one of the auto-detected characters' log files,
     return its roster entry so Browse can mark it active too -- otherwise
     Select and Browse would highlight the roster differently even when they
     land on the very same character's log."""
     target = os.path.normcase(os.path.abspath(path))
-    for entry in discover_characters().values():
+    for entry in discover_characters(extra_dirs).values():
         if os.path.normcase(os.path.abspath(entry["log_path"])) == target:
             return entry
     return None
@@ -248,8 +268,32 @@ def main():
     settings = Settings(SETTINGS_FILE, {
         "log_path": "", "active_character_id": "", "inventory_path": "",
         "hidden_characters": [],
+        # every folder a log was ever browsed from -- auto-detect scans
+        # these alongside the default install dir, so custom installs and
+        # Linux/macOS source runs get a character roster too
+        "log_dirs": [],
         "theme": DEFAULT_THEME,   # shared suite theme set (16-bit Window)
     })
+
+    def scan_dirs():
+        """Extra roster scan roots: remembered browse folders plus the
+        active log's own folder (covers pre-existing setups where the log
+        was picked before log_dirs existed)."""
+        dirs = list(settings.get("log_dirs", []))
+        p = settings.get("log_path", "")
+        if p:
+            d = os.path.dirname(os.path.abspath(p))
+            if d not in dirs:
+                dirs.append(d)
+        return dirs
+
+    def remember_log_dir(path):
+        d = os.path.dirname(os.path.abspath(path))
+        dirs = list(settings.get("log_dirs", []))
+        if d not in dirs:
+            dirs.append(d)
+            settings["log_dirs"] = dirs[-8:]   # keep the newest few
+            settings.save()
 
     root = tk.Tk()
     install_tk_error_logger(root, "eql_launcher", ERROR_LOG)
@@ -412,11 +456,12 @@ def main():
                            ("Text files", "*.txt"), ("All files", "*.*")])
             if chosen and os.path.isfile(chosen):
                 settings["log_path"] = chosen
+                remember_log_dir(chosen)
                 # If the browsed file matches one of the auto-detected
                 # characters, mark it active too -- so Browse highlights the
                 # roster the same way Select does, instead of only updating
                 # the summary line above and leaving the picker unhighlighted.
-                matched = _match_discovered_character(chosen)
+                matched = _match_discovered_character(chosen, scan_dirs())
                 if matched:
                     settings["active_character_id"] = matched["id"]
                     settings["inventory_path"] = matched.get("inventory_path") or ""
@@ -516,7 +561,7 @@ def main():
         def rebuild_roster():
             for w in roster_list.winfo_children():
                 w.destroy()
-            found = discover_characters()
+            found = discover_characters(scan_dirs())
             hidden = set(settings.get("hidden_characters", []))
             hidden_btn.config(text=f"Hidden ({len(hidden)})")
             active_cid = settings.get("active_character_id", "")

@@ -34,10 +34,13 @@ TOOLS = ["eql_launcher", "eql_friend_overlay", "eql_dps_meter",
          "eql_session_report", "eql_atlas"]
 
 # The Atlas ships its optional "pre-discovered" baseline (distilled Project
-# Quarm database -- see eql_atlas_baseline_build.py) as a data file. It lands
-# in _internal, which eql_atlas.py checks via sys._MEIPASS.
-ATLAS_DATAS = ([("eql_atlas_baseline.json.gz", ".")]
-               if os.path.exists("eql_atlas_baseline.json.gz") else [])
+# Quarm database -- see eql_atlas_baseline_build.py) and the quest database
+# (distilled Quarm quest scripts -- see eql_quest_db_build.py) as data
+# files. They land in _internal, which eql_atlas.py / eql_quest.py check
+# via sys._MEIPASS.
+ATLAS_DATAS = [(f, ".") for f in ("eql_atlas_baseline.json.gz",
+                                  "eql_quest_db.json.gz")
+               if os.path.exists(f)]
 
 analyses = []
 for tool in TOOLS:

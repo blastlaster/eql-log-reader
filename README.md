@@ -27,7 +27,9 @@ overlay with a click.
 **Friends Overlay** (`eql_friend_overlay.py`) — live friends list with
 level, class combo, race, zone, and AFK detection. Non-friend `/who`
 searches never pollute the roster and can pop up in their own window.
-Per-character rosters persist between sessions.
+Per-character rosters persist between sessions. Both the list and the
+/who window minimize to their title bars; the minimized list's bar
+flashes when a friend comes online, goes offline, or flips AFK.
 
 **DPS/HPS Meter** (`eql_dps_meter.py`) — retro live combat meter: DPS, HPS,
 DTPS with melee/ranged/spell/poison/song/damage-shield splits, damage
@@ -79,13 +81,47 @@ mode, death marks, hover cards on every pin (drops + percentages), and a
 **guide** that routes you to any item — A* along the map's own geometry
 in-zone, zone-by-zone directions across the world. A **search bar** (and a
 private in-game chat channel — see setup below) drives it all:
-`find <item>`, `guide <item>`, `note <text>`, `fav <item>`.
+`find <item|NPC>`, `guide <item|NPC>`, `note <text>`, `fav <item>` —
+find and guide match **mobs, NPCs, and named** as well as items: your own
+kill spots and the baseline's spawn points are targets too, so
+`guide Beek Guinders` walks you to the quest giver and `find <named>`
+rings its spawn points. Once you're in the target zone the panel names
+what you're looking for — `from: <the mobs that drop it>` for items,
+and `quest: hand in to <NPC>` / `still need: ...` for a tracked quest.
+
+New in v1.8, the Atlas gains a **Quest window** (right-click the panel →
+Quest window): a per-character quest companion built on a distilled copy
+of the Project Quarm quest scripts (~3,300 recognizable item turn-ins).
+**Search** quests by name, NPC, zone, or any required/reward item —
+results honor the same Expansions locks as the rest of the Atlas — and
+add them to a persistent **My Quests** list. The detail pane shows the
+hand-in NPC and zone, every required item with live `[have/need]`
+progress, **where each item drops** (your own observed loot first, then
+the baseline's best rates), the reward (choose-one rewards included),
+and the NPC's success dialogue. Item progress counts up **automatically
+from your loot lines** — only loot picked up after you added the quest
+counts, and `＋`/`－` buttons correct for items you already had or handed
+away. **Track** a quest and its still-missing items ring their known
+drop spots on the Atlas map in violet (the `quest` layer), and the
+**hand-in NPC gets a labeled violet pin** at its spawn point whenever
+you're in its zone; **Guide** routes you to an item's nearest source and
+**Hand-in** to the quest NPC via the Atlas guide — both are toggles, and
+the window's status line keeps a live readout (distance re-ranges as you
+move, zone route while traveling) until you toggle the guide off.
+**Clear ▶** drops only the tracked quest — the rest of the list stays. Quest data is Quarm's;
+EQL availability may differ — but the moment your log shows an NPC
+speaking a quest's hand-in success dialogue (imported history included),
+that quest is flagged **✔ confirmed on EQL**, permanently, per
+character. Everything else is "probably right until your own play proves
+otherwise", the same deal as the loot baseline.
 
 Shared library code (not run directly): `eql_overlay_common.py` (log
 tailing, settings, themes), `eql_combat_tracker.py` (the combat parser),
 `eql_spell_db.py` (spells_us.txt reader), `eql_atlas_map.py` (the Atlas
-map window). `eql_atlas_baseline_build.py` is a dev tool that regenerates
-the baseline from a Quarm database dump.
+map window), `eql_quest.py` (the Atlas quest window).
+`eql_atlas_baseline_build.py` and `eql_quest_db_build.py` are dev tools
+that regenerate the loot baseline and quest database from a Quarm
+database dump / quest-script checkout.
 
 ## Themes
 
@@ -167,6 +203,26 @@ for you automatically.
 10. Press that direction any time you want to update the friends list.
     `/who` results also pop up in their own window — right-click the main
     overlay element and give it a try.
+
+## Requirements
+
+- **Windows 10 or later** for the installer build (the overlays use
+  Windows-specific transparency; running from source on Linux/macOS works
+  for the Session Report and Launcher, with overlays falling back to
+  plain dark windows).
+- **EverQuest Legends with logging on**: type `/log on` in-game once per
+  character — every tool reads `eqlog_<Name>_<Server>.txt` from your
+  install's `Logs` folder. Log **timestamps must be enabled** (lines must
+  start with `[Tue Jul 21 ...]`; see chat Options if they don't).
+- **Nothing else for the installed build** — the installer ships
+  everything, no Python required.
+- Building or running from source: **Python 3.8+ with tkinter** (included
+  in the standard Windows Python installer). No third-party packages.
+- Optional, feature-unlocking extras: `spells_us.txt` / `spells_us_str.txt`
+  from your EQL install (spell/buff features — found automatically),
+  Brewall's map pack in `maps\brewall\` (Atlas map rendering), a `/loc`
+  hotbutton (map positioning), and a private chat channel (Atlas commands
+  — setup below).
 
 ## Running
 

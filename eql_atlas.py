@@ -35,7 +35,9 @@ start from a blank map.
 Commands ride a PRIVATE chat channel the player creates in-game
 (/join <name>:<password>, ideally set as the default typing channel):
 
-    find <item>     where does it drop? (your data first, then baseline)
+    find <item|npc> where is it? matches items, mobs, NPCs, and named
+                    alike (your data first, then baseline)
+    guide <item|npc> lead me to it, cross-zone
     note <text>     pin a note at your last /loc
     fav <item>      favorite an item (map pins in Phase 2)
     help            list commands
@@ -196,6 +198,10 @@ RE_CH_LIST = re.compile(r"^Channels: (.+)$")
 RE_CH_ENTRY = re.compile(r"\d+=([A-Za-z0-9]+)\((\d+)\)")
 RE_CMD_SELF = re.compile(r"^You tell ([A-Za-z0-9]+):\d+, '(.*)'$")
 RE_TELL_OTHER = re.compile(r"^([A-Za-z0-9]+) tells ([A-Za-z0-9]+):\d+, ")
+# NPC dialogue -- "Beek Guinders says 'Hey, great! ...'" (player says carry
+# a comma in some clients; accept both). The quest layer matches these
+# against stored turn-in success dialogue to confirm a quest EXISTS on EQL.
+RE_NPC_SAY = re.compile(r"^([A-Za-z][A-Za-z0-9`' ]{1,40}?) says,? '(.*)'$")
 RE_PLUS_SUFFIX = re.compile(r"\s\+\d+$")
 _COIN_RE = re.compile(r"(\d+)\s+(platinum|gold|silver|copper)")
 _COIN_MULT = {"platinum": 1000, "gold": 100, "silver": 10, "copper": 1}
@@ -555,6 +561,13 @@ class AtlasTracker:
         self.guide = None                # 'guide <item>' navigation state
         self.era_ok = lambda short: True # rebound by the UI's era settings
         self.on_channel_learned = None   # UI hook: persist the learned name
+        self.on_loot = None              # quest hook: (item, qty, t) on loot
+        self.on_npc_say = None           # quest hook: (npc, text, t) on says
+        self.quest_marks = set()         # tracked quest's missing item names
+                                         # (lowercased) -- map 'quest' layer
+        self.quest_need = []             # same, display-cased -- panel line
+        self.quest_npc = None            # tracked quest's hand-in target:
+                                         # (npc_lower, zone_short, label)
 
     def _set_zone(self, short, long_name, mapped):
         self.zone_short = short
@@ -615,6 +628,15 @@ class AtlasTracker:
         # -- command channel (works even before the first zone-in) ----------
         if self._feed_channel(t, rest):
             return
+
+        # NPC dialogue: only consumed by the quest layer's hand-in
+        # confirmation; multi-word speaker names can't be players, and the
+        # hook does its own exact-dialogue matching
+        if self.on_npc_say:
+            m = RE_NPC_SAY.match(rest)
+            if m:
+                self.on_npc_say(m.group(1), m.group(2), t)
+                return
 
         m = RE_ZONE.match(rest)
         if m:
@@ -687,6 +709,8 @@ class AtlasTracker:
             if status == "new":
                 self.novel_finds += 1
             self.last_drop = (base_item, mob, status)
+            if self.on_loot:
+                self.on_loot(base_item, qty, t)
             if self._in_session(t):
                 self.session["loots"] += qty
                 self.session["coin"] += sold
@@ -820,8 +844,8 @@ class AtlasTracker:
             self._respond(t, text, self._cmd_fav(arg))
         elif verb == "help":
             self._respond(t, text,
-                          ["find <item>  -- where it drops (+map marks)",
-                           "guide <item> -- lead me to it (guide off stops)",
+                          ["find <item|npc>  -- where it is (+map marks)",
+                           "guide <item|npc> -- lead me to it (guide off)",
                            "clear <item> -- unmark one item (clear = all)",
                            "note <text>  -- pin a note at your /loc",
                            "fav <item>   -- favorite an item"])
@@ -864,14 +888,42 @@ class AtlasTracker:
         bhits.sort(key=lambda h: (-h[0], -h[1]))
         for here, pct, zshort, mob, nm in bhits[:4 - len(lines)]:
             lines.append(f"map: {nm} <- {mob}, {zshort} {pct:g}%")
-        # loot spots in THIS zone get orange markers on the map window
+        # mobs and NPCs match too (quest givers, named, anything): your
+        # own kills first, then the baseline's spawn knowledge
+        mseen = []
+        for zshort, z in self.db.data["zones"].items():
+            for key, mrec in z["mobs"].items():
+                if low in key:
+                    mseen.append((zshort == self.zone_short,
+                                  mrec["kills"] + mrec["kills_group"],
+                                  zshort, mrec["name"]))
+        mseen.sort(key=lambda h: (-h[0], -h[1]))
+        for here, k, zshort, name in mseen[:2]:
+            lines.append(f"you: {name} in {zshort} ({k} kills)")
+        bmob = []
+        for zshort, zn in self.base.npcs.items():
+            if not self.era_ok(zshort):
+                continue
+            for key, rec in zn.items():
+                if low in key:
+                    bmob.append((zshort == self.zone_short,
+                                 rec["named"], zshort, rec))
+        bmob.sort(key=lambda h: (-h[0], -h[1]))
+        for here, named, zshort, rec in bmob[:2]:
+            lo_l, hi_l = rec["level"]
+            tag = " *named*" if named else ""
+            lines.append(f"map: {rec['name']}, {zshort} "
+                         f"lvl {lo_l}-{hi_l}{tag}")
+        # matching spots in THIS zone get orange markers on the map window
         z = self.db.data["zones"].get(self.zone_short)
         if z:
             spots = sum(1 for e in z["events"]
-                        if e[1] == "L" and e[4] is not None
-                        and e[3] and low in e[3].lower())
+                        if e[4] is not None
+                        and ((e[1] == "L" and e[3] and low in e[3].lower())
+                             or (e[1] == "K" and e[2]
+                                 and low in e[2].lower())))
             if spots:
-                lines.append(f"{spots} looted spot(s) marked here")
+                lines.append(f"{spots} spot(s) marked here")
         return lines or [f"no '{term}' anywhere yet -- go discover it"]
 
     def run_local_command(self, text):
@@ -923,18 +975,52 @@ class AtlasTracker:
         g["target"] = None
         g["route"] = []
         g["zone"] = None
+        g["who"] = []
+
+        def zone_who(short):
+            """WHO to look for once you're in the target zone: empty when
+            the guide target IS a mob/NPC (the label already names it),
+            else the mobs that drop the item -- your own observed sources
+            first, the baseline's otherwise. Feeds the panel's
+            'from: ...' line and the Quest window's readout."""
+            z = self.db.data["zones"].get(short)
+            names = []
+            if z:
+                for key, mrec in z["mobs"].items():
+                    if low in key:
+                        return []        # guiding to the mob itself
+                    if any(low in item.lower() for item in mrec["drops"]):
+                        names.append(mrec["name"])
+            if not names:
+                hits = []
+                for key, rec in self.base.npcs.get(short, {}).items():
+                    if low in key:
+                        return []
+                    for iid, pct in rec["loot"]:
+                        nm = self.base.item_name(iid)
+                        if nm and low in nm.lower():
+                            hits.append((pct, rec["name"]))
+                            break
+                names = [n for _, n in sorted(hits, key=lambda h: -h[0])]
+            return names[:3]
 
         def zone_spots(short):
+            """Where `low` can be found in a zone: spots you've looted the
+            item or killed the matching mob (guides work for NPCs and named
+            too), else baseline spawn points of matching mobs / droppers."""
             spots = []
             z = self.db.data["zones"].get(short)
             if z:
                 spots += [(e[4], e[5], e[6] or 0) for e in z["events"]
-                          if e[1] == "L" and e[4] is not None
-                          and e[3] and low in e[3].lower()]
+                          if e[4] is not None
+                          and ((e[1] == "L" and e[3] and low in e[3].lower())
+                               or (e[1] == "K" and e[2]
+                                   and low in e[2].lower()))]
             if not spots:
-                for rec in self.base.npcs.get(short, {}).values():
-                    if any(low in (self.base.item_name(i) or "").lower()
-                           for i, _ in rec["loot"]):
+                for key, rec in self.base.npcs.get(short, {}).items():
+                    if (low in key
+                            or any(low in (self.base.item_name(i) or "").lower()
+                                   for i, _ in rec["loot"])):
                         spots += [(s[1], s[0], s[2]) for s in rec["spawns"]]
             return spots
 
@@ -947,19 +1033,22 @@ class AtlasTracker:
                                + (s[1] - px) ** 2)
                 g["target"] = spots[0]
                 g["zone"] = here
+                g["who"] = zone_who(here)
                 return
         dests = set()
         for zshort, z in self.db.data["zones"].items():
             if zshort != here and any(
-                    e[1] == "L" and e[3] and low in e[3].lower()
+                    (e[1] == "L" and e[3] and low in e[3].lower())
+                    or (e[1] == "K" and e[2] and low in e[2].lower())
                     for e in z["events"]):
                 dests.add(zshort)
         for zshort, zn in self.base.npcs.items():
             if zshort == here or not self.era_ok(zshort):
                 continue
-            for rec in zn.values():
-                if any(low in (self.base.item_name(i) or "").lower()
-                       for i, _ in rec["loot"]):
+            for key, rec in zn.items():
+                if (low in key
+                        or any(low in (self.base.item_name(i) or "").lower()
+                               for i, _ in rec["loot"])):
                     dests.add(zshort)
                     break
         g["dests"] = dests
@@ -1120,6 +1209,7 @@ def run_overlay(log_path):
     import tkinter as tk
     from tkinter import font as tkfont, messagebox
     from eql_atlas_map import AtlasMapWindow
+    from eql_quest import QuestDB, QuestState, QuestWindow
 
     settings = {"x": 40, "y": 260, "opacity": 0.88, "theme": DEFAULT_THEME,
                 "panel_width": 340, "font_size": 9,
@@ -1144,14 +1234,42 @@ def run_overlay(log_path):
     tracker = AtlasTracker(db, baseline,
                            command_channel=db.data.get("command_channel", ""))
 
-    def era_ok(short):
+    def era_level():
         allowed = 0
         for name, lvl in ERA_LEVELS:
             if settings.get("eras", {}).get(name):
                 allowed = max(allowed, lvl)
-        return baseline.zone_era(short) <= allowed
+        return allowed
+
+    def era_ok(short):
+        return baseline.zone_era(short) <= era_level()
 
     tracker.era_ok = era_ok
+
+    # -- quest layer: DB + per-character progress live even while the Quest
+    # window is closed, so loot keeps crediting quests either way
+    quest_db = QuestDB(APP_DIR)
+    quest_state = QuestState(
+        data_path(f"eql_quest_{char}_{server}.json", APP_DIR))
+
+    def push_quest_marks():
+        tracker.quest_need = quest_state.outstanding_items(quest_db)
+        tracker.quest_marks = {n.lower() for n in tracker.quest_need}
+
+    def on_loot(item, qty, t):
+        if quest_state.credit_loot(quest_db, item, qty, t):
+            push_quest_marks()
+
+    def on_npc_say(npc, text, t):
+        # observed hand-in success dialogue = the quest exists on EQL
+        for qid in quest_db.match_handin(npc, text):
+            quest_state.confirm(qid, t)
+
+    tracker.on_loot = on_loot
+    if quest_db.ok:
+        tracker.on_npc_say = on_npc_say
+    push_quest_marks()
+    tracker.quest_npc = quest_state.handin_target(quest_db)
 
     root = tk.Tk()
     install_tk_error_logger(root, "eql_atlas", ERROR_LOG)
@@ -1509,9 +1627,12 @@ def run_overlay(log_path):
                                insertbackground=th["accent"])
         search_clear.configure(bg=th["bg"], fg=th["dim"])
         slist_frame.configure(bg=th["bg"])
+        # selected-row text is SOLID BLACK, never th["bg"]: on the Neon
+        # HUD theme the bg color is the chroma key, and key-colored text
+        # renders as see-through holes over the game footage
         slist.configure(bg=th["panel"], fg=th["fg"],
                         selectbackground=th["accent"],
-                        selectforeground=th["bg"])
+                        selectforeground="#000000")
         if th.get("transparent"):
             try:
                 root.attributes("-transparentcolor", th["bg"])
@@ -1595,9 +1716,24 @@ def run_overlay(log_path):
                 else:
                     lines.append((f"guide: {g['label']} marked on map",
                                   th["warn"]))
+                # arrived in the right zone: name WHO to look for -- the
+                # mob(s) that drop the item; guiding to a mob/NPC itself
+                # needs no extra line, the label already names it
+                if g.get("who"):
+                    lines.append(("  from: " + ", ".join(g["who"]),
+                                  th["alt"]))
             elif g.get("route"):
                 lines.append(("guide: " + " > ".join(g["route"]),
                               th["warn"]))
+        # tracked quest: standing in the hand-in zone names the NPC to
+        # find (and the still-missing drops, if any)
+        qn = getattr(tracker, "quest_npc", None)
+        if qn and qn[1] == tracker.zone_short:
+            lines.append((f"quest: hand in to {qn[2]}", th["warn"]))
+            need = getattr(tracker, "quest_need", None)
+            if need:
+                lines.append(("  still need: " + ", ".join(need[:3]),
+                              th["alt"]))
         if tracker.last_drop:
             item, mob, status = tracker.last_drop
             color = th["warn"] if status == "new" else th["alt"]
@@ -1685,12 +1821,31 @@ def run_overlay(log_path):
         win = ensure_map()
         win.toggle()
 
+    # -- quest window -- created lazily, owned by this overlay ---------------
+    questw = {"win": None}
+
+    def ensure_quest():
+        if questw["win"] is None or not questw["win"].top.winfo_exists():
+            questw["win"] = QuestWindow(root, settings, save_settings,
+                                        lambda: get_theme(settings["theme"]),
+                                        quest_db, quest_state, era_level)
+            return questw["win"], True
+        return questw["win"], False
+
+    def toggle_quest():
+        win, created = ensure_quest()
+        # a fresh Toplevel is already on screen -- toggling it would hide
+        # the window the click meant to open
+        win.show() if created else win.toggle()
+
     def pick_theme(k):
         settings["theme"] = k
         save_settings()
         apply_theme()
         if mapw["win"] and mapw["win"].top.winfo_exists():
             mapw["win"].apply_theme()
+        if questw["win"] and questw["win"].top.winfo_exists():
+            questw["win"].apply_theme()
         redraw()
 
     def set_opacity(v):
@@ -1720,15 +1875,20 @@ def run_overlay(log_path):
         db.reset()
         tracker.zone_short = tracker.zone_long = None
         tracker.novel_finds = 0
-        run_import(0)
+        # replayed history must not re-credit quest item progress
+        quest_state.suspend_credit = True
+        try:
+            run_import(0)
+        finally:
+            quest_state.suspend_credit = False
 
     def show_menu(e):
         menu = tk.Menu(root, tearoff=0, bg=th["panel"], fg=th["fg"],
                        activebackground=th["accent"],
-                       activeforeground=th["bg"])
+                       activeforeground="#000000")
         tmenu = tk.Menu(menu, tearoff=0, bg=th["panel"], fg=th["fg"],
                         activebackground=th["accent"],
-                        activeforeground=th["bg"])
+                        activeforeground="#000000")
         for key, spec in RETRO_THEMES.items():
             mark = "● " if key == settings["theme"] else "   "
             tmenu.add_command(label=mark + spec["label"],
@@ -1736,7 +1896,7 @@ def run_overlay(log_path):
         menu.add_cascade(label="Theme", menu=tmenu)
         omenu = tk.Menu(menu, tearoff=0, bg=th["panel"], fg=th["fg"],
                         activebackground=th["accent"],
-                        activeforeground=th["bg"])
+                        activeforeground="#000000")
         for v in (1.0, 0.88, 0.75, 0.6):
             mark = "● " if abs(settings["opacity"] - v) < 0.01 else "   "
             omenu.add_command(label=f"{mark}{int(v * 100)}%",
@@ -1744,7 +1904,7 @@ def run_overlay(log_path):
         menu.add_cascade(label="Opacity", menu=omenu)
         wmenu = tk.Menu(menu, tearoff=0, bg=th["panel"], fg=th["fg"],
                         activebackground=th["accent"],
-                        activeforeground=th["bg"])
+                        activeforeground="#000000")
         for w in (300, 340, 400, 480):
             mark = "● " if settings.get("panel_width", 340) == w else "   "
             wmenu.add_command(label=f"{mark}{w}px",
@@ -1752,7 +1912,7 @@ def run_overlay(log_path):
         menu.add_cascade(label="Panel width", menu=wmenu)
         fmenu = tk.Menu(menu, tearoff=0, bg=th["panel"], fg=th["fg"],
                         activebackground=th["accent"],
-                        activeforeground=th["bg"])
+                        activeforeground="#000000")
         for fs in (8, 9, 10, 12, 14):
             mark = "● " if settings.get("font_size", 9) == fs else "   "
             fmenu.add_command(label=f"{mark}{fs}pt",
@@ -1760,7 +1920,7 @@ def run_overlay(log_path):
         menu.add_cascade(label="Text size", menu=fmenu)
         emenu = tk.Menu(menu, tearoff=0, bg=th["panel"], fg=th["fg"],
                         activebackground=th["accent"],
-                        activeforeground=th["bg"])
+                        activeforeground="#000000")
 
         def toggle_era(name):
             eras = settings.setdefault("eras", {})
@@ -1774,6 +1934,7 @@ def run_overlay(log_path):
         menu.add_cascade(label="Expansions", menu=emenu)
         menu.add_separator()
         menu.add_command(label="Map window", command=toggle_map)
+        menu.add_command(label="Quest window", command=toggle_quest)
         menu.add_command(label="Save now", command=db.save)
         menu.add_command(label="Re-scan full log...", command=rescan)
         menu.add_separator()
@@ -1827,6 +1988,8 @@ def run_overlay(log_path):
 
     if settings.get("map_open"):
         ensure_map().show()
+    if settings.get("quest_open"):
+        ensure_quest()[0].show()
 
     def poll():
         watcher.poll()
@@ -1842,6 +2005,8 @@ def run_overlay(log_path):
             redraw()
         if mapw["win"] and mapw["win"].top.winfo_exists():
             mapw["win"].tick(tracker, db, baseline)
+        if questw["win"] and questw["win"].top.winfo_exists():
+            questw["win"].tick(tracker, db, baseline)
         root.after(POLL_INTERVAL_MS, poll)
 
     poll()
