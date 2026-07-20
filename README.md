@@ -236,6 +236,24 @@ python eql_launcher.py
 or run any tool directly, e.g.
 `python eql_dps_meter.py "C:\...\Logs\eqlog_Name_server.txt"`.
 
+### Linux
+
+Each release also ships Linux packages (the tools run on the distro's
+own `python3` — install `python3-tk` first if `import tkinter` fails):
+
+- **Any distro:** download `eql-log-reader-<ver>-linux.tar.gz`, unpack,
+  and run `./install.sh` — a per-user install (no root): files in
+  `~/.local/share/eql-log-reader`, an `eql-log-reader` command in
+  `~/.local/bin`, and an application-menu entry.
+  `./install.sh --uninstall` removes it.
+- **Debian/Ubuntu/Mint:** `sudo apt install ./eql-log-reader_<ver>_all.deb`
+  — system-wide install to `/opt/eql-log-reader` with the same command
+  and menu entry; per-user settings go to `~/.local/share/eql-log-reader`.
+
+Overlay niceties that depend on Windows (chroma-key transparency, the
+ghost mode) degrade to plain dark windows; everything else works. Point
+the tools at your log file (synced or native) with Browse.
+
 ## Notes on accuracy
 
 Log-line formats were calibrated against real gameplay logs; anything the

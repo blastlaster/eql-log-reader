@@ -102,14 +102,31 @@ class LogWatcher:
 def data_path(filename, script_dir):
     """Resolve where a per-user data file lives.
 
-    Running from SOURCE: next to the scripts, as always (dev workflow).
+    Running from SOURCE in a writable folder: next to the scripts, as
+    always (dev workflow, and the Linux tarball's per-user install).
+    Running from SOURCE in a READ-ONLY folder (the Linux .deb installs to
+    root-owned /opt/eql-log-reader): XDG data home,
+    ~/.local/share/eql-log-reader.
     FROZEN (installed) builds: %APPDATA%\\EQL Log Reader -- the exe sits in
     Program Files, where writes fail (or get UAC-virtualized) for normal
     users and don't survive uninstall/reinstall cycles. A file found only
     next to the exe (older builds wrote there when they could) is migrated
     once, so nobody loses their settings/records on update."""
     if not getattr(sys, "frozen", False):
-        return os.path.join(script_dir, filename)
+        if os.access(script_dir, os.W_OK):
+            return os.path.join(script_dir, filename)
+        if os.name == "nt":
+            base = os.environ.get("APPDATA") or os.path.expanduser("~")
+            d = os.path.join(base, "EQL Log Reader")
+        else:
+            base = os.environ.get("XDG_DATA_HOME") or os.path.join(
+                os.path.expanduser("~"), ".local", "share")
+            d = os.path.join(base, "eql-log-reader")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            return os.path.join(script_dir, filename)
+        return os.path.join(d, filename)
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
     d = os.path.join(base, "EQL Log Reader")
     try:

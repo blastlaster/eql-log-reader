@@ -41,6 +41,30 @@ Re-run both scripts whenever you change the Python source; they clean up
 after themselves (`build\`, `dist\`, `.buildenv\` are all disposable and
 already covered by `.gitignore` additions below).
 
+## Linux packages
+
+The suite is pure stdlib Python, so the Linux "build" is just packaging
+sources + data files to run on the distro's own `python3` (with
+`python3-tk`). One script produces both artifacts into `Output\`, **from
+any OS** -- no Linux toolchain needed (a `.deb` is an `ar` archive of two
+tarballs, which the script writes by hand):
+
+    python packaging\linux\build_linux_packages.py
+
+- `eql-log-reader-<ver>-linux.tar.gz` -- universal: unpack, `./install.sh`.
+  Per-user XDG install (`~/.local/share/eql-log-reader`, `eql-log-reader`
+  command in `~/.local/bin`, menu entry); `./install.sh --uninstall`
+  removes it. No root needed.
+- `eql-log-reader_<ver>_all.deb` -- Debian/Ubuntu/Mint:
+  `sudo apt install ./eql-log-reader_<ver>_all.deb`. Installs to
+  `/opt/eql-log-reader` with a system-wide `eql-log-reader` command and
+  menu entry; per-user data goes to `~/.local/share/eql-log-reader`
+  (`data_path` in `eql_overlay_common.py` detects the read-only install
+  dir). Declares `Depends: python3 (>= 3.8), python3-tk`.
+
+The version is read from `CURRENT_VERSION` in `eql_overlay_common.py`.
+Upload both files alongside the Windows Setup.exe on the release.
+
 ## What each new file is
 
 - `icon.ico` -- multi-resolution version of `icon.png`, needed because
